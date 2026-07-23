@@ -30,6 +30,9 @@ ARD collections (`ga_s2am_ard_3` / `ga_s2bm_ard_3`) via STAC.
 - Only raw bands (incl. fmask) are stored. `get_ds(..., clean=True)` applies
   cloud masking **on read** — there is no second "clean" copy on disk,
   roughly halving storage versus a raw+clean layout.
+- Spectral indices — NDVI, CFI, NIRv, NDTI, CAI — are on-read
+  derivatives too: `get_ds(..., indices=('NDVI', 'NIRv'))` computes them
+  from cloud-masked reflectance and stores nothing.
 - Writes are whole-chunk and the index is transactional (SQLite/WAL): a
   crash mid-fill just leaves cells unmarked, and the next run resumes.
 
@@ -46,6 +49,8 @@ bbox = [148.36265, -33.52606, 148.38265, -33.50606]  # [W, S, E, N]
 
 ds_raw = cube.get_ds(bbox, date(2024, 1, 1), date(2024, 12, 31))
 ds     = cube.get_ds(bbox, date(2024, 1, 1), date(2024, 12, 31), clean=True)
+ds     = cube.get_ds(bbox, date(2024, 1, 1), date(2024, 12, 31),
+                     indices=('NDVI', 'CFI', 'NIRv', 'NDTI', 'CAI'))
 
 cube.fill(bbox, date(2024, 1, 1), date(2024, 12, 31))  # → 0: already local
 ```

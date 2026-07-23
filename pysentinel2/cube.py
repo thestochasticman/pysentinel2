@@ -77,13 +77,18 @@ def clean_dataset(ds: Dataset, sentinel2: Sentinel2 = defaultsentinel2,
     """Cloud-mask a raw cube window and drop too-cloudy frames.
 
     An fmask-based clear-sky mask (cloud + shadow pixels → NaN, fmask band
-    dropped), then scenes whose NaN fraction exceeds ``max_nan_fraction``
-    are removed. Computed on read, never stored — the clean cube costs no
-    disk.
+    dropped) and per-band nodata masking, then scenes whose NaN fraction
+    exceeds ``max_nan_fraction`` are removed. Computed on read, never
+    stored — the clean cube costs no disk.
     """
     fmask = ds[sentinel2.cloud_mask_band]
     clear_mask = (fmask != sentinel2.fmask_cloud) & (fmask != sentinel2.fmask_shadow)
+    nodatas = {name: ds[name].attrs.get('nodata') for name in ds.data_vars
+               if name != sentinel2.cloud_mask_band}
     ds = ds.drop_vars(sentinel2.cloud_mask_band).where(clear_mask)
+    for name, nodata in nodatas.items():
+        if nodata is not None:
+            ds[name] = ds[name].where(ds[name] != nodata)
 
     nan_frac = ds.to_array().isnull().mean(dim=['variable', 'x', 'y'])
     ds = ds.sel(time=nan_frac < max_nan_fraction)
@@ -248,7 +253,8 @@ class Cube:
     # -- read -------------------------------------------------------------
 
     def get_ds(s, bbox: list[float], start: date, end: date, clean: bool = False,
-            max_nan_fraction: float = 0.5, threads: int = 8) -> Dataset:
+            max_nan_fraction: float = 0.5, indices: tuple[str, ...] = (),
+            threads: int = 8) -> Dataset:
         """Return the Sentinel-2 window for ``bbox`` x ``[start, end]``,
         downloading only what's missing first.
 
@@ -262,6 +268,11 @@ class Cube:
             clean: Apply :func:`clean_dataset` (cloud mask + frame filter)
                 to the window before returning it.
             max_nan_fraction: Frame-filter threshold used when ``clean=True``.
+            indices: Spectral indices to compute on read (never stored) —
+                any of ``'NDVI'``, ``'CFI'``, ``'NIRv'``, ``'NDTI'``,
+                ``'CAI'`` (:mod:`pysentinel2.derive`). Requesting indices
+                implies ``clean=True`` so formulas see cloud-masked
+                reflectance.
             threads: I/O concurrency for any downloads triggered.
 
         Returns:
@@ -277,8 +288,11 @@ class Cube:
             ix.close()
 
         ds = s._read_window(window, sorted(by_day))
-        if clean:
+        if clean or indices:
             ds = clean_dataset(ds, s.sentinel2, max_nan_fraction)
+        if indices:
+            from pysentinel2.derive import add_indices
+            ds = add_indices(ds, indices)
         return ds
 
     # -- Query adapters (the reproducibility layer speaks Query) ----------
@@ -288,10 +302,11 @@ class Cube:
         return s.fill(query.bbox, query.start, query.end, threads=threads)
 
     def get_ds_query(s, query, clean: bool = False, max_nan_fraction: float = 0.5,
-                  threads: int = 8) -> Dataset:
+                  indices: tuple[str, ...] = (), threads: int = 8) -> Dataset:
         """:meth:`get_ds` for a :class:`borevitz_lab.query.Query`."""
         return s.get_ds(query.bbox, query.start, query.end, clean=clean,
-                     max_nan_fraction=max_nan_fraction, threads=threads)
+                     max_nan_fraction=max_nan_fraction, indices=indices,
+                     threads=threads)
 
     def _read_window(s, window, days: list[str]) -> Dataset:
         row0, row1, col0, col1 = window
