@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pysentinel2"
+version = "0.1.0"
+description = "Cached Sentinel-2 ARD cube downloads (STAC to Zarr) with cloud masking"
+readme = "README.md"
+authors = [
+  { name = "Borevitz Lab, Australian National University" },
+  { name = "Yasar Adeel Ansari", email = "u6737670@anu.edu.au" },
+]
+license = { text = "MIT" }
+requires-python = ">=3.11"
+keywords = [
+  "sentinel-2",
+  "remote-sensing",
+  "stac",
+  "zarr",
+  "geospatial",
+  "earth-observation",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: GIS",
+]
+dependencies = [
+  "attrs",
+  "borevitz-lab",
+  "dask",
+  "numpy",
+  "odc-stac",
+  "pystac-client",
+  "rioxarray",
+  "typing_extensions",
+  "urllib3",
+  "xarray",
+  "zarr",
+]
+
+[project.urls]
+Homepage = "https://github.com/thestochasticman/pysentinel2"
+Repository = "https://github.com/thestochasticman/pysentinel2"
+Issues = "https://github.com/thestochasticman/pysentinel2/issues"
+
+[tool.setuptools.packages.find]
+include = ["pysentinel2", "pysentinel2.*"]
