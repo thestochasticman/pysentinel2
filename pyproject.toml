@@ -31,18 +31,13 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering :: GIS",
 ]
+# The geospatial stack (GDAL/rasterio, odc-stac, dask, zarr, …) is
+# provided by conda via environment.yml; only the lab core is declared
+# here so `pip install -e .` is fast and doesn't re-resolve it.
 dependencies = [
   "attrs",
   "borevitz-lab",
-  "dask",
-  "numpy",
-  "odc-stac",
-  "pystac-client",
-  "rioxarray",
   "typing_extensions",
-  "urllib3",
-  "xarray",
-  "zarr",
 ]
 
 [project.urls]
