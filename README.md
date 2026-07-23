@@ -72,6 +72,28 @@ composition only):
 - **`Index`** (`pysentinel2.index`) — the SQLite ledger.
 - **`Cube`** (`pysentinel2.cube`) — ties them together.
 
+## Performance
+
+Live measurements against DEA — a ~2 × 2 km AOI, 11-band ARD at 10 m
+(one *cell* = one 256 × 256-px chunk on one solar day):
+
+| Scenario | Downloaded | Time |
+|---|---|---|
+| Cold fill — 3 weeks (3 clear scenes) | 12 cells | 5.7 s |
+| Same request again | nothing | **0.0 s** |
+| AOI shifted 1 km (inside cached chunks) | nothing | **0.0 s** |
+| Date range extended +1 month | 32 cells — *new days only* | 17.2 s |
+| Read cached window (512² px × 3 days × 11 bands) | — | 0.13 s |
+| Read cached window, cloud-masked (`clean=True`) | — | 0.23 s |
+
+Store footprint: **13.6 MB for 11 solar days** — raw + fmask only, since
+the clean cube is a 0.1 s on-read transform rather than a second copy.
+Under the old per-query layout the shifted AOI and the extended range
+would each have re-downloaded and re-stored everything they overlap.
+
+Absolute times vary with network and DEA load; the zeros are the point —
+they are index lookups, no network involved.
+
 ## Install
 
 All lab repos share one conda environment, `borevitz_lab` — each repo's
