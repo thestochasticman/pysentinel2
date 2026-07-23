@@ -38,7 +38,7 @@ def clean_sentinel2(
     if ds_sentinel2 is not None:
         return clean_dataset(ds_sentinel2, sentinel2, max_nan_fraction)
     cube = Cube(config=query.config, sentinel2=sentinel2)
-    return cube.get(query, clean=True, max_nan_fraction=max_nan_fraction)
+    return cube.get_query(query, clean=True, max_nan_fraction=max_nan_fraction)
 
 
 def test_clean_drops_fmask_band():

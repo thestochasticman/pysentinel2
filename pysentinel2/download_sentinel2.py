@@ -31,7 +31,7 @@ def download_sentinel2(
     """
     from pysentinel2.cube import Cube
     cube = Cube(config=query.config, sentinel2=sentinel2)
-    return cube.get(query, threads=threads_per_worker)
+    return cube.get_query(query, threads=threads_per_worker)
 
 
 def test_internet(s):
@@ -78,7 +78,7 @@ def test_repeat_query_downloads_nothing():
         stub='s2_repeat', config=_shared_test_cfg(),
     )
     download_sentinel2(q)
-    return Cube(config=q.config).fill(q) == 0
+    return Cube(config=q.config).fill_query(q) == 0
 
 
 def test_overlapping_query_downloads_only_new_cells():
@@ -97,7 +97,7 @@ def test_overlapping_query_downloads_only_new_cells():
     cube = Cube(config=cfg)
     n_days = len(cube._index().scenes_for_range(q2.start, q2.end, cube.sentinel2.max_cloud_cover))
     total_cells = len(grid.chunks_in_window(grid.window_for_bbox(q2.bbox))) * max(n_days, 1)
-    downloaded = cube.fill(q2)
+    downloaded = cube.fill_query(q2)
     return 0 <= downloaded < total_cells
 
 

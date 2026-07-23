@@ -11,12 +11,16 @@ EPSG:6933/10 m grid (:mod:`pysentinel2.grid`):
             ├── nbart_red # global-grid array; only written chunks exist on disk
             └── ...
 
-``Cube.get(query)`` diffs the query's (day x chunk) cells against the
-index, downloads only the missing cells, then reads the window. Nothing
-is ever fetched twice — overlapping bboxes, extended date ranges and
-repeat runs all reuse the same chunks. Only the raw bands (incl. fmask)
-are stored; ``get(clean=True)`` applies cloud masking on read, so no
-second "clean" copy exists on disk.
+``Cube.get(bbox, start, end)`` diffs the requested (day x chunk) cells
+against the index, downloads only the missing cells, then reads the
+window. Nothing is ever fetched twice — overlapping bboxes, extended
+date ranges and repeat runs all reuse the same chunks. Only the raw
+bands (incl. fmask) are stored; ``get(..., clean=True)`` applies cloud
+masking on read, so no second "clean" copy exists on disk.
+
+The core API is query-agnostic (bbox + dates — the data layer);
+``get_query`` / ``fill_query`` adapt a :class:`borevitz_lab.query.Query`
+(the reproducibility layer) onto it.
 """
 
 import os
@@ -30,7 +34,6 @@ from os import makedirs
 from xarray import Dataset
 
 from borevitz_lab.config import Config, config as default_config
-from borevitz_lab.query import Query
 from pysentinel2 import grid
 from pysentinel2.index import Index
 from pysentinel2.paths import Paths
@@ -100,11 +103,13 @@ class Cube:
 
     Example:
         ```python
+        from datetime import date
         from pysentinel2.cube import Cube
 
         cube = Cube()
-        ds  = cube.get(query)              # fills gaps, returns raw window
-        dsc = cube.get(query, clean=True)  # cloud-masked view of the same pixels
+        ds  = cube.get(bbox, date(2024, 1, 1), date(2024, 6, 30))  # fills gaps, returns raw window
+        dsc = cube.get(bbox, date(2024, 1, 1), date(2024, 6, 30), clean=True)
+        dsq = cube.get_query(query)        # same, for pipelines that speak Query
         ```
     """
 
@@ -122,23 +127,27 @@ class Cube:
 
     # -- fill -------------------------------------------------------------
 
-    def fill(s, query: Query, threads: int = 8) -> int:
-        """Ensure every (day x chunk) cell covering ``query`` is populated.
+    def fill(s, bbox: list[float], start: date, end: date, threads: int = 8) -> int:
+        """Ensure every (day x chunk) cell covering ``bbox`` x ``[start, end]``
+        is populated.
 
-        Returns the number of cells actually downloaded — 0 means the query
-        was already fully covered and no network was touched (beyond a STAC
-        search if this exact region/range was never searched before).
+        Query-agnostic: takes the region and range directly, no
+        :class:`borevitz_lab.query.Query` (and none of its registry/dir side
+        effects) required. Returns the number of cells actually downloaded —
+        0 means the request was already fully covered and no network was
+        touched (beyond a STAC search if this exact region/range was never
+        searched before).
         """
-        window = grid.window_for_bbox(query.bbox)
+        window = grid.window_for_bbox(bbox)
         wanted = grid.chunks_in_window(window)
         bbox6933 = (grid.X0 + window[2] * grid.RES, grid.Y_TOP - window[1] * grid.RES,
                     grid.X0 + window[3] * grid.RES, grid.Y_TOP - window[0] * grid.RES)
         ix = s._index()
         try:
-            if not ix.search_covered(bbox6933, query.start, query.end):
-                s._search_stac(ix, window, bbox6933, query.start, query.end)
+            if not ix.search_covered(bbox6933, start, end):
+                s._search_stac(ix, window, bbox6933, start, end)
 
-            by_day = ix.scenes_for_range(query.start, query.end, s.sentinel2.max_cloud_cover)
+            by_day = ix.scenes_for_range(start, end, s.sentinel2.max_cloud_cover)
             downloaded = 0
             for day, item_dicts in by_day.items():
                 missing = set(wanted) - ix.chunks_done(day, wanted)
@@ -239,13 +248,18 @@ class Cube:
 
     # -- read -------------------------------------------------------------
 
-    def get(s, query: Query, clean: bool = False, max_nan_fraction: float = 0.5,
-            threads: int = 8) -> Dataset:
-        """Return the Sentinel-2 window for ``query``, downloading only what's
-        missing first.
+    def get(s, bbox: list[float], start: date, end: date, clean: bool = False,
+            max_nan_fraction: float = 0.5, threads: int = 8) -> Dataset:
+        """Return the Sentinel-2 window for ``bbox`` x ``[start, end]``,
+        downloading only what's missing first.
+
+        Query-agnostic — the data layer of the package. Pipelines that
+        speak :class:`borevitz_lab.query.Query` use :meth:`get_query`.
 
         Args:
-            query: The :class:`borevitz_lab.query.Query` (bbox + date range).
+            bbox: ``[west, south, east, north]`` in EPSG:4326.
+            start: Inclusive start date.
+            end: Inclusive end date.
             clean: Apply :func:`clean_dataset` (cloud mask + frame filter)
                 to the window before returning it.
             max_nan_fraction: Frame-filter threshold used when ``clean=True``.
@@ -255,11 +269,11 @@ class Cube:
             xarray.Dataset with dims ``(time, y, x)`` on the fixed grid,
             time = solar days (cloud-filtered per the ``Sentinel2`` config).
         """
-        s.fill(query, threads=threads)
-        window = grid.window_for_bbox(query.bbox)
+        s.fill(bbox, start, end, threads=threads)
+        window = grid.window_for_bbox(bbox)
         ix = s._index()
         try:
-            by_day = ix.scenes_for_range(query.start, query.end, s.sentinel2.max_cloud_cover)
+            by_day = ix.scenes_for_range(start, end, s.sentinel2.max_cloud_cover)
         finally:
             ix.close()
 
@@ -267,6 +281,18 @@ class Cube:
         if clean:
             ds = clean_dataset(ds, s.sentinel2, max_nan_fraction)
         return ds
+
+    # -- Query adapters (the reproducibility layer speaks Query) ----------
+
+    def fill_query(s, query, threads: int = 8) -> int:
+        """:meth:`fill` for a :class:`borevitz_lab.query.Query`."""
+        return s.fill(query.bbox, query.start, query.end, threads=threads)
+
+    def get_query(s, query, clean: bool = False, max_nan_fraction: float = 0.5,
+                  threads: int = 8) -> Dataset:
+        """:meth:`get` for a :class:`borevitz_lab.query.Query`."""
+        return s.get(query.bbox, query.start, query.end, clean=clean,
+                     max_nan_fraction=max_nan_fraction, threads=threads)
 
     def _read_window(s, window, days: list[str]) -> Dataset:
         row0, row1, col0, col1 = window
@@ -337,20 +363,24 @@ def _write_synthetic_day(cube: Cube, day: str, window, value: int) -> None:
         arr[row0:row1, col0:col1] = np.full((row1 - row0, col1 - col0), band_value, dtype=dtype)
 
 
-def test_synthetic_write_read_roundtrip():
-    from borevitz_lab.query import Query as Q
-    cube = _tmp_cube()
-    q = Q(bbox=_TEST_BBOX, start=date(2024, 1, 1), end=date(2024, 1, 31),
-          stub='cube_roundtrip', config=cube.config)
-    window = grid.window_for_bbox(q.bbox)
-    ix = cube._index()
-    ix.upsert_scenes([('synth_a', '2024-01-03', 1.0, {'id': 'synth_a'})])
-    ix.record_search((-1e9, -1e9, 1e9, 1e9), q.start, q.end)
-    ix.mark_chunks('2024-01-03', grid.chunks_in_window(window))
-    ix.close()
-    _write_synthetic_day(cube, '2024-01-03', window, value=1234)
+_TEST_START, _TEST_END = date(2024, 1, 1), date(2024, 1, 31)
 
-    ds = cube.get(q)
+
+def _prime_synthetic(cube: Cube, day: str, item_id: str, value: int):
+    """Mark a fully-populated synthetic day in the index and store."""
+    window = grid.window_for_bbox(_TEST_BBOX)
+    ix = cube._index()
+    ix.upsert_scenes([(item_id, day, 1.0, {'id': item_id})])
+    ix.record_search((-1e9, -1e9, 1e9, 1e9), _TEST_START, _TEST_END)
+    ix.mark_chunks(day, grid.chunks_in_window(window))
+    ix.close()
+    _write_synthetic_day(cube, day, window, value=value)
+
+
+def test_synthetic_write_read_roundtrip():
+    cube = _tmp_cube()
+    _prime_synthetic(cube, '2024-01-03', 'synth_a', value=1234)
+    ds = cube.get(_TEST_BBOX, _TEST_START, _TEST_END)
     return (
         ds.time.size == 1
         and int(ds['nbart_red'].isel(time=0)[0, 0]) == 1234
@@ -359,19 +389,9 @@ def test_synthetic_write_read_roundtrip():
 
 
 def test_clean_masks_and_drops_fmask():
-    from borevitz_lab.query import Query as Q
     cube = _tmp_cube()
-    q = Q(bbox=_TEST_BBOX, start=date(2024, 1, 1), end=date(2024, 1, 31),
-          stub='cube_clean', config=cube.config)
-    window = grid.window_for_bbox(q.bbox)
-    ix = cube._index()
-    ix.upsert_scenes([('synth_b', '2024-01-08', 1.0, {'id': 'synth_b'})])
-    ix.record_search((-1e9, -1e9, 1e9, 1e9), q.start, q.end)
-    ix.mark_chunks('2024-01-08', grid.chunks_in_window(window))
-    ix.close()
-    _write_synthetic_day(cube, '2024-01-08', window, value=42)
-
-    ds = cube.get(q, clean=True)
+    _prime_synthetic(cube, '2024-01-08', 'synth_b', value=42)
+    ds = cube.get(_TEST_BBOX, _TEST_START, _TEST_END, clean=True)
     return (
         cube.sentinel2.cloud_mask_band not in ds.data_vars
         and ds.time.size == 1  # fully clear frame survives the filter
@@ -382,17 +402,26 @@ def test_clean_masks_and_drops_fmask():
 def test_fill_skips_populated_cells():
     """With search covered and all chunks marked, fill() must return 0
     without touching the network (no STAC client is even constructed)."""
-    from borevitz_lab.query import Query as Q
     cube = _tmp_cube()
-    q = Q(bbox=_TEST_BBOX, start=date(2024, 1, 1), end=date(2024, 1, 31),
-          stub='cube_nofetch', config=cube.config)
-    window = grid.window_for_bbox(q.bbox)
-    ix = cube._index()
-    ix.upsert_scenes([('synth_c', '2024-01-13', 1.0, {'id': 'synth_c'})])
-    ix.record_search((-1e9, -1e9, 1e9, 1e9), q.start, q.end)
-    ix.mark_chunks('2024-01-13', grid.chunks_in_window(window))
-    ix.close()
-    return cube.fill(q) == 0
+    _prime_synthetic(cube, '2024-01-13', 'synth_c', value=7)
+    return cube.fill(_TEST_BBOX, _TEST_START, _TEST_END) == 0
+
+
+def test_query_adapters_match_agnostic_calls():
+    """get_query/fill_query are pure delegations to the bbox+dates core."""
+    from borevitz_lab.query import Query
+    cube = _tmp_cube()
+    _prime_synthetic(cube, '2024-01-18', 'synth_d', value=99)
+    q = Query(bbox=_TEST_BBOX, start=_TEST_START, end=_TEST_END,
+              stub='cube_adapter', config=cube.config)
+    ds_agnostic = cube.get(_TEST_BBOX, _TEST_START, _TEST_END)
+    ds_query = cube.get_query(q)
+    return (
+        cube.fill_query(q) == 0
+        and ds_query.time.size == ds_agnostic.time.size
+        and float(ds_query['nbart_red'].isel(time=0)[0, 0])
+            == float(ds_agnostic['nbart_red'].isel(time=0)[0, 0])
+    )
 
 
 def test():
@@ -400,6 +429,7 @@ def test():
         test_synthetic_write_read_roundtrip(),
         test_clean_masks_and_drops_fmask(),
         test_fill_skips_populated_cells(),
+        test_query_adapters_match_agnostic_calls(),
     ])
 
 

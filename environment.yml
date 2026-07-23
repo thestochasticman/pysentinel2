@@ -1,0 +1,30 @@
+# Augments (or creates) the shared borevitz_lab conda environment with
+# pysentinel2's geospatial stack:
+#
+#   conda env update -n borevitz_lab -f environment.yml
+#   conda activate borevitz_lab
+#   pip install -e ../borevitz_lab && pip install -e .
+#
+# Never use --prune: the env is shared across lab repos.
+name: borevitz_lab
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11
+  - pip
+  # shared core (borevitz-lab)
+  - attrs
+  - tabulate
+  - typing_extensions
+  # pysentinel2
+  - numpy
+  - xarray
+  - zarr
+  - dask
+  - rioxarray
+  - rasterio
+  - odc-stac
+  - pystac-client
+  - pyproj
+  - urllib3

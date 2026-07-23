@@ -35,27 +35,30 @@ ARD collections (`ga_s2am_ard_3` / `ga_s2bm_ard_3`) via STAC.
 
 ## Usage
 
+The core API is **query-agnostic** — just a bbox and dates, no setup:
+
 ```python
 from datetime import date
-from borevitz_lab.query import Query
 from pysentinel2.cube import Cube
 
-query = Query(
-    bbox=[148.36265, -33.52606, 148.38265, -33.50606],  # [W, S, E, N]
-    start=date(2024, 1, 1),
-    end=date(2024, 12, 31),
-    stub='my_aoi',
-)
-
 cube = Cube()
-ds_raw = cube.get(query)              # raw window incl. fmask, dims (time, y, x)
-ds     = cube.get(query, clean=True)  # cloud-masked view of the same pixels
+bbox = [148.36265, -33.52606, 148.38265, -33.50606]  # [W, S, E, N]
 
-cube.fill(query)                      # → 0: everything already local
+ds_raw = cube.get(bbox, date(2024, 1, 1), date(2024, 12, 31))
+ds     = cube.get(bbox, date(2024, 1, 1), date(2024, 12, 31), clean=True)
+
+cube.fill(bbox, date(2024, 1, 1), date(2024, 12, 31))  # → 0: already local
+```
+
+Pipelines that speak the shared `borevitz_lab.query.Query` (the
+reproducibility layer — stubs, registry) use the adapters:
+
+```python
+ds = cube.get_query(query)            # = cube.get(query.bbox, query.start, query.end)
 ```
 
 `download_sentinel2(query)` and `clean_sentinel2(query)` remain as thin
-wrappers over `Cube.get` for pipeline compatibility.
+wrappers over `Cube.get_query` for pipeline compatibility.
 
 Package design (shared across the lab's packages — no inheritance,
 composition only):
@@ -71,13 +74,20 @@ composition only):
 
 ## Install
 
+All lab repos share one conda environment, `borevitz_lab` — each repo's
+`environment.yml` creates it if missing and adds its own packages if it
+exists (never use `--prune`):
+
 ```bash
+conda env update -n borevitz_lab -f environment.yml
+conda activate borevitz_lab
 pip install -e ../borevitz_lab   # shared core (not yet on PyPI)
 pip install -e .
 ```
 
-Needs the geospatial native stack (GDAL/PROJ) available for
-`rasterio`/`rioxarray`; under conda use the lab's environment.
+Without conda, you need the geospatial native stack (GDAL/PROJ)
+available system-wide for `rasterio`/`rioxarray`, then the same two
+`pip install -e` lines.
 
 ## Robustness notes
 
