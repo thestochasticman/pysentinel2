@@ -1,6 +1,6 @@
 """Cloud-masked Sentinel-2 window for a query — computed on read.
 
-Thin compatibility wrapper over :func:`pysentinel2.cube.Cube.get` with
+Thin compatibility wrapper over :func:`pysentinel2.cube.Cube.get_ds` with
 ``clean=True``. There is no persisted "clean" copy anymore: masking a
 window is cheap, so the clean cube is a view of the raw store rather
 than a second store — roughly halving disk use versus the old layout.
@@ -38,7 +38,7 @@ def clean_sentinel2(
     if ds_sentinel2 is not None:
         return clean_dataset(ds_sentinel2, sentinel2, max_nan_fraction)
     cube = Cube(config=query.config, sentinel2=sentinel2)
-    return cube.get_query(query, clean=True, max_nan_fraction=max_nan_fraction)
+    return cube.get_ds_query(query, clean=True, max_nan_fraction=max_nan_fraction)
 
 
 def test_clean_drops_fmask_band():

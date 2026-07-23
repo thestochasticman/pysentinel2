@@ -21,13 +21,13 @@ ARD collections (`ga_s2am_ard_3` / `ga_s2bm_ard_3`) via STAC.
 ```
 
 - Any bbox maps deterministically to a set of ~2.56 km grid chunks.
-  `Cube.get(query)` diffs the requested (day × chunk) cells against the
+  `Cube.get_ds(bbox, start, end)` diffs the requested (day × chunk) cells against the
   index and downloads **only the missing cells**.
 - STAC results are cached (full item JSON) in the index, so re-reads and
   re-fills of known regions work without re-searching. Cloud-cover
   filtering happens at read time from the index — relaxing the threshold
   later needs no re-search.
-- Only raw bands (incl. fmask) are stored. `get(clean=True)` applies
+- Only raw bands (incl. fmask) are stored. `get_ds(..., clean=True)` applies
   cloud masking **on read** — there is no second "clean" copy on disk,
   roughly halving storage versus a raw+clean layout.
 - Writes are whole-chunk and the index is transactional (SQLite/WAL): a
@@ -44,8 +44,8 @@ from pysentinel2.cube import Cube
 cube = Cube()
 bbox = [148.36265, -33.52606, 148.38265, -33.50606]  # [W, S, E, N]
 
-ds_raw = cube.get(bbox, date(2024, 1, 1), date(2024, 12, 31))
-ds     = cube.get(bbox, date(2024, 1, 1), date(2024, 12, 31), clean=True)
+ds_raw = cube.get_ds(bbox, date(2024, 1, 1), date(2024, 12, 31))
+ds     = cube.get_ds(bbox, date(2024, 1, 1), date(2024, 12, 31), clean=True)
 
 cube.fill(bbox, date(2024, 1, 1), date(2024, 12, 31))  # → 0: already local
 ```
@@ -54,11 +54,11 @@ Pipelines that speak the shared `borevitz_lab.query.Query` (the
 reproducibility layer — stubs, registry) use the adapters:
 
 ```python
-ds = cube.get_query(query)            # = cube.get(query.bbox, query.start, query.end)
+ds = cube.get_ds_query(query)            # = cube.get_ds(query.bbox, query.start, query.end)
 ```
 
 `download_sentinel2(query)` and `clean_sentinel2(query)` remain as thin
-wrappers over `Cube.get_query` for pipeline compatibility.
+wrappers over `Cube.get_ds_query` for pipeline compatibility.
 
 Package design (shared across the lab's packages — no inheritance,
 composition only):

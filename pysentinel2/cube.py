@@ -11,15 +11,15 @@ EPSG:6933/10 m grid (:mod:`pysentinel2.grid`):
             ├── nbart_red # global-grid array; only written chunks exist on disk
             └── ...
 
-``Cube.get(bbox, start, end)`` diffs the requested (day x chunk) cells
+``Cube.get_ds(bbox, start, end)`` diffs the requested (day x chunk) cells
 against the index, downloads only the missing cells, then reads the
 window. Nothing is ever fetched twice — overlapping bboxes, extended
 date ranges and repeat runs all reuse the same chunks. Only the raw
-bands (incl. fmask) are stored; ``get(..., clean=True)`` applies cloud
+bands (incl. fmask) are stored; ``get_ds(..., clean=True)`` applies cloud
 masking on read, so no second "clean" copy exists on disk.
 
 The core API is query-agnostic (bbox + dates — the data layer);
-``get_query`` / ``fill_query`` adapt a :class:`borevitz_lab.query.Query`
+``get_ds_query`` / ``fill_query`` adapt a :class:`borevitz_lab.query.Query`
 (the reproducibility layer) onto it.
 """
 
@@ -107,9 +107,9 @@ class Cube:
         from pysentinel2.cube import Cube
 
         cube = Cube()
-        ds  = cube.get(bbox, date(2024, 1, 1), date(2024, 6, 30))  # fills gaps, returns raw window
-        dsc = cube.get(bbox, date(2024, 1, 1), date(2024, 6, 30), clean=True)
-        dsq = cube.get_query(query)        # same, for pipelines that speak Query
+        ds  = cube.get_ds(bbox, date(2024, 1, 1), date(2024, 6, 30))  # fills gaps, returns raw window
+        dsc = cube.get_ds(bbox, date(2024, 1, 1), date(2024, 6, 30), clean=True)
+        dsq = cube.get_ds_query(query)        # same, for pipelines that speak Query
         ```
     """
 
@@ -248,13 +248,13 @@ class Cube:
 
     # -- read -------------------------------------------------------------
 
-    def get(s, bbox: list[float], start: date, end: date, clean: bool = False,
+    def get_ds(s, bbox: list[float], start: date, end: date, clean: bool = False,
             max_nan_fraction: float = 0.5, threads: int = 8) -> Dataset:
         """Return the Sentinel-2 window for ``bbox`` x ``[start, end]``,
         downloading only what's missing first.
 
         Query-agnostic — the data layer of the package. Pipelines that
-        speak :class:`borevitz_lab.query.Query` use :meth:`get_query`.
+        speak :class:`borevitz_lab.query.Query` use :meth:`get_ds_query`.
 
         Args:
             bbox: ``[west, south, east, north]`` in EPSG:4326.
@@ -288,10 +288,10 @@ class Cube:
         """:meth:`fill` for a :class:`borevitz_lab.query.Query`."""
         return s.fill(query.bbox, query.start, query.end, threads=threads)
 
-    def get_query(s, query, clean: bool = False, max_nan_fraction: float = 0.5,
+    def get_ds_query(s, query, clean: bool = False, max_nan_fraction: float = 0.5,
                   threads: int = 8) -> Dataset:
-        """:meth:`get` for a :class:`borevitz_lab.query.Query`."""
-        return s.get(query.bbox, query.start, query.end, clean=clean,
+        """:meth:`get_ds` for a :class:`borevitz_lab.query.Query`."""
+        return s.get_ds(query.bbox, query.start, query.end, clean=clean,
                      max_nan_fraction=max_nan_fraction, threads=threads)
 
     def _read_window(s, window, days: list[str]) -> Dataset:
@@ -380,7 +380,7 @@ def _prime_synthetic(cube: Cube, day: str, item_id: str, value: int):
 def test_synthetic_write_read_roundtrip():
     cube = _tmp_cube()
     _prime_synthetic(cube, '2024-01-03', 'synth_a', value=1234)
-    ds = cube.get(_TEST_BBOX, _TEST_START, _TEST_END)
+    ds = cube.get_ds(_TEST_BBOX, _TEST_START, _TEST_END)
     return (
         ds.time.size == 1
         and int(ds['nbart_red'].isel(time=0)[0, 0]) == 1234
@@ -391,7 +391,7 @@ def test_synthetic_write_read_roundtrip():
 def test_clean_masks_and_drops_fmask():
     cube = _tmp_cube()
     _prime_synthetic(cube, '2024-01-08', 'synth_b', value=42)
-    ds = cube.get(_TEST_BBOX, _TEST_START, _TEST_END, clean=True)
+    ds = cube.get_ds(_TEST_BBOX, _TEST_START, _TEST_END, clean=True)
     return (
         cube.sentinel2.cloud_mask_band not in ds.data_vars
         and ds.time.size == 1  # fully clear frame survives the filter
@@ -408,14 +408,14 @@ def test_fill_skips_populated_cells():
 
 
 def test_query_adapters_match_agnostic_calls():
-    """get_query/fill_query are pure delegations to the bbox+dates core."""
+    """get_ds_query/fill_query are pure delegations to the bbox+dates core."""
     from borevitz_lab.query import Query
     cube = _tmp_cube()
     _prime_synthetic(cube, '2024-01-18', 'synth_d', value=99)
     q = Query(bbox=_TEST_BBOX, start=_TEST_START, end=_TEST_END,
               stub='cube_adapter', config=cube.config)
-    ds_agnostic = cube.get(_TEST_BBOX, _TEST_START, _TEST_END)
-    ds_query = cube.get_query(q)
+    ds_agnostic = cube.get_ds(_TEST_BBOX, _TEST_START, _TEST_END)
+    ds_query = cube.get_ds_query(q)
     return (
         cube.fill_query(q) == 0
         and ds_query.time.size == ds_agnostic.time.size

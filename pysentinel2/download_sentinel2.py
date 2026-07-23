@@ -31,7 +31,7 @@ def download_sentinel2(
     """
     from pysentinel2.cube import Cube
     cube = Cube(config=query.config, sentinel2=sentinel2)
-    return cube.get_query(query, threads=threads_per_worker)
+    return cube.get_ds_query(query, threads=threads_per_worker)
 
 
 def test_internet(s):
