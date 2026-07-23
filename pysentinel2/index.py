@@ -10,8 +10,8 @@ Three tables, no pixels:
 - ``searches`` — which (bbox, date-range) regions STAC has been queried
   for, so "no scenes" is distinguishable from "never asked".
 
-SQLite (WAL mode) replaces both the old ``queries.json``/fcntl registry
-pattern and the ``_SUCCESS`` marker files: status flips are transactions.
+SQLite (WAL mode) makes completeness transactional: a crash mid-fill
+leaves cells unmarked — never a half-written cell recorded as done.
 """
 import json
 import sqlite3

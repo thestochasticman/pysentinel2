@@ -1,9 +1,9 @@
 """Cloud-masked Sentinel-2 window for a query — computed on read.
 
 Thin compatibility wrapper over :func:`pysentinel2.cube.Cube.get_ds` with
-``clean=True``. There is no persisted "clean" copy anymore: masking a
-window is cheap, so the clean cube is a view of the raw store rather
-than a second store — roughly halving disk use versus the old layout.
+``clean=True``. No "clean" copy is ever persisted: masking a window is
+cheap, so the clean cube is a view of the raw store rather than a
+second store.
 """
 
 from xarray import Dataset

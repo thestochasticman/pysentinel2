@@ -1,8 +1,7 @@
 """One machine-wide Sentinel-2 datacube that fills itself on demand.
 
-Instead of one isolated Zarr per (bbox, time) query, every pixel this
-machine ever downloads lands in a single sparse store on the fixed
-EPSG:6933/10 m grid (:mod:`pysentinel2.grid`):
+Every pixel this machine ever downloads lands in a single sparse store
+on the fixed EPSG:6933/10 m grid (:mod:`pysentinel2.grid`):
 
     {config.tmp_dir}/sentinel2_cube/
     ├── index.db      # what's populated / what's been searched (pysentinel2.index)
@@ -77,10 +76,10 @@ def clean_dataset(ds: Dataset, sentinel2: Sentinel2 = defaultsentinel2,
                   max_nan_fraction: float = 0.5) -> Dataset:
     """Cloud-mask a raw cube window and drop too-cloudy frames.
 
-    Same semantics as the old persisted "clean" zarr — fmask-based clear-sky
-    mask (cloud + shadow pixels → NaN, fmask band dropped), then scenes whose
-    NaN fraction exceeds ``max_nan_fraction`` are removed — but computed on
-    read instead of stored, so the clean copy costs no disk.
+    An fmask-based clear-sky mask (cloud + shadow pixels → NaN, fmask band
+    dropped), then scenes whose NaN fraction exceeds ``max_nan_fraction``
+    are removed. Computed on read, never stored — the clean cube costs no
+    disk.
     """
     fmask = ds[sentinel2.cloud_mask_band]
     clear_mask = (fmask != sentinel2.fmask_cloud) & (fmask != sentinel2.fmask_shadow)
