@@ -29,15 +29,8 @@ ARD collections (`ga_s2am_ard_3` / `ga_s2bm_ard_3`) via STAC.
   later needs no re-search.
 - Only raw bands (incl. fmask) are stored. `get_ds(..., clean=True)` applies
   cloud masking **on read** — there is no second "clean" copy on disk,
-  roughly halving storage versus a raw+clean layout. Cleaning
-  distinguishes invalid pixels (off-swath nodata) from contaminated ones
-  (cloud/shadow, snow by default, water optionally), dilates the
-  contamination mask by `buffer_px` (default 3) to catch cloud-edge
-  halos, and filters frames on two interpretable gates:
-  `max_cloud_fraction` (contamination over *valid* pixels — a clear
-  frame with a big swath margin is not penalised) and
-  `min_valid_fraction` (window coverage). Per-frame `cloud_fraction` /
-  `valid_fraction` land as coordinates on the result.
+  roughly halving storage versus a raw+clean layout. See
+  [Cleaning & masking](#cleaning--masking) for exactly what the mask does.
 - Spectral indices — NDVI, CFI, NIRv, NDTI, CAI — are on-read
   derivatives too: `get_ds(..., indices=('NDVI', 'NIRv'))` computes them
   from cloud-masked reflectance and stores nothing.
@@ -84,6 +77,58 @@ composition only):
 - **`grid`** — the fixed global grid (pure, offline-testable math).
 - **`Index`** (`pysentinel2.index`) — the SQLite ledger.
 - **`Cube`** (`pysentinel2.cube`) — ties them together.
+
+## Cleaning & masking
+
+`clean=True` (and any `indices=` request, which implies it) runs the
+window through `pysentinel2.cube.clean_dataset`. The design principle:
+**invalid and contaminated are different things.**
+
+| Pixel state | fmask | Meaning | Treatment |
+|---|---|---|---|
+| Invalid | 0 (nodata) | Outside the scene footprint / never sensed | → NaN; counts *against coverage*, not against cloudiness |
+| Clear | 1 | Usable land observation | kept |
+| Cloud | 2 | Contaminated | → NaN (dilated) |
+| Shadow | 3 | Contaminated | → NaN (dilated) |
+| Snow | 4 | Corrupts reflectance stats like cloud | → NaN by default (`mask_snow=False` to keep) |
+| Water | 5 | Legitimate signal (NDWI, dams, rivers) | kept by default (`mask_water=True` to drop) |
+
+**Pipeline, in order:**
+
+1. **Classify** every pixel from the fmask band (table above). Band
+   nodata values (−999) are additionally masked to NaN.
+2. **Dilate** the contaminated mask by `buffer_px` (default 3 px ≈ 30 m,
+   circular structuring element). fmask draws tight cloud boundaries;
+   the bright halo and penumbra just outside them are the classic
+   source of corrupted "clear" pixels.
+3. **Gate frames** on two independent, interpretable statistics:
+   - `cloud_fraction` = contaminated ÷ **valid** pixels. Frames above
+     `max_cloud_fraction` (default 0.5) are dropped. Because the
+     denominator is valid pixels, a cloud-free frame that only
+     partially overlaps the AOI is *not* penalised for its swath
+     margin.
+   - `valid_fraction` = valid ÷ all window pixels. Frames below
+     `min_valid_fraction` (default 0.2) are dropped — a sliver of
+     swath is not a usable observation, however clear.
+4. **Annotate**: both statistics attach to the result as `time`
+   coordinates, and the filter settings
+   (`max_cloud_fraction`, `min_valid_fraction`, `cloud_buffer_px`,
+   `masked_fmask_classes`) as dataset attrs — every frame's survival
+   is auditable after the fact.
+
+```python
+ds = cube.get_ds(bbox, start, end, clean=True,
+                 max_cloud_fraction=0.3,   # stricter: ≤30% contamination
+                 min_valid_fraction=0.5,   # ≥half the window sensed
+                 mask_water=True,          # e.g. for pure-vegetation stats
+                 buffer_px=5)              # wider halo exclusion
+
+ds.cloud_fraction    # (time,) — why each surviving frame survived
+ds.valid_fraction    # (time,)
+```
+
+Nothing here is persisted: different thresholds on the same window are
+just different reads of the same raw store.
 
 ## Performance
 
