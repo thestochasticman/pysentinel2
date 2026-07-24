@@ -1,0 +1,49 @@
+{% set version = "0.1.0" %}
+
+package:
+  name: pysentinel2
+  version: {{ version }}
+
+source:
+  path: ..
+
+build:
+  noarch: python
+  number: 0
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+
+requirements:
+  host:
+    - python >=3.11
+    - pip
+    - setuptools >=61
+    - wheel
+  run:
+    - python >=3.11
+    - borevitz-lab
+    - attrs
+    - typing_extensions
+    - numpy
+    - scipy
+    - xarray
+    - zarr
+    - dask
+    - rasterio
+    - rioxarray
+    - odc-stac
+    - pystac-client
+    - pyproj
+    - affine
+    - urllib3
+
+test:
+  imports:
+    - pysentinel2
+    - pysentinel2.grid
+    - pysentinel2.index
+
+about:
+  home: https://github.com/thestochasticman/pysentinel2
+  license: MIT
+  license_file: LICENSE
+  summary: Self-filling local Sentinel-2 datacube (STAC to Zarr) with cloud masking
