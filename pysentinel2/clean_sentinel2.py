@@ -14,7 +14,6 @@ from pysentinel2.sentinel2 import Sentinel2, defaultsentinel2
 def clean_sentinel2(
     query: Query,
     ds_sentinel2: Dataset | None = None,
-    max_nan_fraction: float = None,
     sentinel2: Sentinel2 = defaultsentinel2,
     **clean_kwargs,
 ) -> Dataset:
@@ -26,9 +25,6 @@ def clean_sentinel2(
         ds_sentinel2: Optional in-memory raw dataset (must still include
             the fmask band); if given, it is masked directly and the cube
             is not touched.
-        max_nan_fraction: Legacy alias for ``max_cloud_fraction`` (the
-            frame filter now counts contamination over valid pixels
-            rather than NaN over the whole window).
         sentinel2: Config supplying the fmask band and class codes.
             Defaults to the bundled DEA config.
         **clean_kwargs: Forwarded to
@@ -42,8 +38,6 @@ def clean_sentinel2(
         ``valid_fraction`` coordinates.
     """
     from pysentinel2.cube import Cube, clean_dataset
-    if max_nan_fraction is not None:
-        clean_kwargs.setdefault('max_cloud_fraction', max_nan_fraction)
     if ds_sentinel2 is not None:
         return clean_dataset(ds_sentinel2, sentinel2, **clean_kwargs)
     cube = Cube(config=query.config, sentinel2=sentinel2)
@@ -63,7 +57,7 @@ def test_clean_drops_fmask_band():
         start=date(2024, 1, 1), end=date(2024, 1, 21),
         stub='clean_no_fmask', config=cfg,
     )
-    ds = clean_sentinel2(q, max_nan_fraction=0.7)
+    ds = clean_sentinel2(q, max_cloud_fraction=0.7)
     return defaultsentinel2.cloud_mask_band not in ds.data_vars and ds.time.size > 0
 
 
