@@ -14,8 +14,9 @@ from pysentinel2.sentinel2 import Sentinel2, defaultsentinel2
 def clean_sentinel2(
     query: Query,
     ds_sentinel2: Dataset | None = None,
-    max_nan_fraction: float = 0.5,
+    max_nan_fraction: float = None,
     sentinel2: Sentinel2 = defaultsentinel2,
+    **clean_kwargs,
 ) -> Dataset:
     """Produce a cloud-masked, frame-filtered Sentinel-2 window.
 
@@ -25,20 +26,28 @@ def clean_sentinel2(
         ds_sentinel2: Optional in-memory raw dataset (must still include
             the fmask band); if given, it is masked directly and the cube
             is not touched.
-        max_nan_fraction: Drop scenes whose NaN fraction (mean over bands,
-            x, y) exceeds this threshold. Default 0.5.
-        sentinel2: Config supplying ``cloud_mask_band``, ``fmask_cloud``,
-            and ``fmask_shadow``. Defaults to the bundled DEA config.
+        max_nan_fraction: Legacy alias for ``max_cloud_fraction`` (the
+            frame filter now counts contamination over valid pixels
+            rather than NaN over the whole window).
+        sentinel2: Config supplying the fmask band and class codes.
+            Defaults to the bundled DEA config.
+        **clean_kwargs: Forwarded to
+            :func:`pysentinel2.cube.clean_dataset` —
+            ``max_cloud_fraction``, ``min_valid_fraction``, ``mask_snow``,
+            ``mask_water``, ``buffer_px``.
 
     Returns:
         xarray.Dataset: The cleaned window, fmask band removed, only the
-        retained timesteps.
+        retained timesteps, with per-frame ``cloud_fraction`` /
+        ``valid_fraction`` coordinates.
     """
     from pysentinel2.cube import Cube, clean_dataset
+    if max_nan_fraction is not None:
+        clean_kwargs.setdefault('max_cloud_fraction', max_nan_fraction)
     if ds_sentinel2 is not None:
-        return clean_dataset(ds_sentinel2, sentinel2, max_nan_fraction)
+        return clean_dataset(ds_sentinel2, sentinel2, **clean_kwargs)
     cube = Cube(config=query.config, sentinel2=sentinel2)
-    return cube.get_ds_query(query, clean=True, max_nan_fraction=max_nan_fraction)
+    return cube.get_ds_query(query, clean=True, **clean_kwargs)
 
 
 def test_clean_drops_fmask_band():

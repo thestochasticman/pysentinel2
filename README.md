@@ -29,7 +29,15 @@ ARD collections (`ga_s2am_ard_3` / `ga_s2bm_ard_3`) via STAC.
   later needs no re-search.
 - Only raw bands (incl. fmask) are stored. `get_ds(..., clean=True)` applies
   cloud masking **on read** — there is no second "clean" copy on disk,
-  roughly halving storage versus a raw+clean layout.
+  roughly halving storage versus a raw+clean layout. Cleaning
+  distinguishes invalid pixels (off-swath nodata) from contaminated ones
+  (cloud/shadow, snow by default, water optionally), dilates the
+  contamination mask by `buffer_px` (default 3) to catch cloud-edge
+  halos, and filters frames on two interpretable gates:
+  `max_cloud_fraction` (contamination over *valid* pixels — a clear
+  frame with a big swath margin is not penalised) and
+  `min_valid_fraction` (window coverage). Per-frame `cloud_fraction` /
+  `valid_fraction` land as coordinates on the result.
 - Spectral indices — NDVI, CFI, NIRv, NDTI, CAI — are on-read
   derivatives too: `get_ds(..., indices=('NDVI', 'NIRv'))` computes them
   from cloud-masked reflectance and stores nothing.

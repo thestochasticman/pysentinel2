@@ -28,8 +28,11 @@ class Sentinel2:
     # STAC search time — all scenes are recorded, so relaxing the threshold
     # later needs no re-search, just fills the newly-eligible days).
     max_cloud_cover: float = 30.0
+    fmask_nodata: int = 0
     fmask_cloud: int = 2
     fmask_shadow: int = 3
+    fmask_snow: int = 4
+    fmask_water: int = 5
     crs: str = 'EPSG:6933'
     resolution: int = 10
     groupby: str = 'solar_day'

@@ -19,6 +19,7 @@ dependencies:
   - typing_extensions
   # pysentinel2
   - numpy
+  - scipy
   - xarray
   - zarr
   - dask
