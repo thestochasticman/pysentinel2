@@ -8,6 +8,12 @@ ranges and repeat runs all reuse the same chunks. Part of the
 source is [Digital Earth Australia](https://explorer.dea.ga.gov.au/)'s
 ARD collections (`ga_s2am_ard_3` / `ga_s2bm_ard_3`) via STAC.
 
+**Full documentation — architecture, grid math, storage, cleaning
+science, indices, robustness — lives in [`docs/`](docs/README.md),**
+with flowcharts and figures generated from a real store.
+
+![Every stored solar day for the example window](docs/images/cube_frames_rgb.png)
+
 ## How it works
 
 ```
@@ -92,6 +98,8 @@ window through `pysentinel2.cube.clean_dataset`. The design principle:
 | Shadow | 3 | Contaminated | → NaN (dilated) |
 | Snow | 4 | Corrupts reflectance stats like cloud | → NaN by default (`mask_snow=False` to keep) |
 | Water | 5 | Legitimate signal (NDWI, dams, rivers) | kept by default (`mask_water=True` to drop) |
+
+![On-read cleaning of a cloudy frame](docs/images/cleaning_pipeline.png)
 
 **Pipeline, in order:**
 
