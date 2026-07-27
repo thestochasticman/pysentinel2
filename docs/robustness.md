@@ -35,18 +35,18 @@ GDAL_HTTP_RETRY_DELAY = 1        # s, GDAL doubles internally
 CPL_VSIL_CURL_USE_HEAD = NO      # DEA S3 serves ranged GETs; skip HEAD probes
 ```
 
-The low-speed pair is the important one: it distinguishes a *stalled*
-transfer (no progress — abort and retry) from a merely *slow* one
-(progressing — leave it alone), so large fills over slow links are not
-killed by an absolute timeout.
+The low-speed settings carry most of the value: they distinguish a
+stalled transfer (no progress; abort and retry) from a slow but
+progressing one (left alone), so large fills over slow links are not
+terminated by an absolute timeout.
 
-## Why failures are cheap
+## Consequences of failure
 
-The [crash-safety ordering](storage.md#crash-safety-semantics) means any
-of the above failing terminally mid-fill costs no integrity: cells not
-yet marked in the ledger are simply re-fetched on the next run, and
-already-marked cells are never touched again. Robustness here is about
-*latency*, not correctness.
+The [crash-safety ordering](storage.md#crash-safety-semantics) bounds
+the cost of any of these failing terminally mid-fill: cells not yet
+marked in the ledger are re-fetched on the next run, and already-marked
+cells are never touched again. The mitigations above therefore affect
+latency, not correctness.
 
 ## Verifying against a live endpoint
 

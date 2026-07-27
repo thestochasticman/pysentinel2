@@ -8,13 +8,13 @@ ranges and repeat runs all reuse the same chunks. Part of the
 source is [Digital Earth Australia](https://explorer.dea.ga.gov.au/)'s
 ARD collections (`ga_s2am_ard_3` / `ga_s2bm_ard_3`) via STAC.
 
-**Full documentation — architecture, grid math, storage, cleaning
-science, indices, robustness — lives in [`docs/`](docs/README.md),**
-with flowcharts and figures generated from a real store.
+Full documentation — architecture, grid geometry, storage, cleaning,
+indices, robustness — is in [`docs/`](docs/README.md), with flowcharts
+and figures generated from a real store.
 
 ![Every stored solar day for the example window](docs/images/cube_frames_rgb.png)
-*One store, every observation it holds for a 2 × 2 km window: clear,
-cloudy and off-swath days alike are stored raw and classified on read.*
+*Contents of the store for a 2 × 2 km example window. Clear, cloudy and
+off-swath days are all stored raw and classified at read time.*
 
 ## How it works
 

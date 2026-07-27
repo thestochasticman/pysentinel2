@@ -44,7 +44,7 @@ flowchart TD
 | `derive` | `pysentinel2/derive.py` | On-read spectral indices — see [Spectral indices](indices.md). |
 | wrappers | `download_sentinel2.py`, `clean_sentinel2.py` | Compatibility entry points for pipelines that speak `borevitz_lab.query.Query`. |
 
-The core API is deliberately **query-agnostic** — `Cube.get_ds(bbox,
+The core API is deliberately query-agnostic — `Cube.get_ds(bbox,
 start, end)` needs nothing but a region and a date range. The `Query`
 adapters (`get_ds_query`, `fill_query`) exist so pipelines built on the
 lab's reproducibility layer plug in without translation code.
@@ -52,7 +52,7 @@ lab's reproducibility layer plug in without translation code.
 ## The `fill` algorithm
 
 `fill()` is the write path; `get_ds()` is `fill()` followed by a read.
-The unit of accounting throughout is the **(solar-day × chunk) cell**.
+The unit of accounting throughout is the (solar-day × chunk) cell.
 
 ```mermaid
 flowchart TD
@@ -63,29 +63,29 @@ flowchart TD
     C -- "yes" --> F["index.scenes_for_range:<br/>solar days ≤ max_cloud_cover"]
     E --> F
     F --> G{"for each solar day:<br/>wanted − chunks_done ≠ ∅?"}
-    G -- "no missing cells" --> K["skip day (0 bytes network)"]
+    G -- "no missing cells" --> K["skip day — no network traffic"]
     G -- "missing cells" --> H["odc.stac.load pinned to the<br/>window's GeoBox — chunk-aligned"]
     H --> I["write whole chunks into the<br/>day's global Zarr arrays"]
     I --> J["index.mark_chunks (transactional)"]
     J --> G
     K --> G
-    G -- "all days done" --> L["return number of cells downloaded<br/>(0 ⇒ fully served from cache)"]
+    G -- "all days done" --> L["return number of cells downloaded<br/>(0 = fully served from cache)"]
 ```
 
-Two properties make this correct rather than merely fast:
+Two properties underpin the correctness of the scheme:
 
 - **Downloads are pinned to the grid.** `odc.stac.load` receives a
   `GeoBox` constructed from the chunk-aligned window
   (`grid.geobox_for_window`), so every downloaded pixel lands at its
-  one canonical position in the global array. Writes therefore touch
-  whole chunks only, and a ledger row is truthful the moment its
-  transaction commits.
+  single canonical position in the global array. Writes therefore
+  cover whole chunks only, and a ledger row is accurate from the
+  moment its transaction commits.
 - **Search caching is separate from pixel caching.** The `searches`
-  table distinguishes *"this region/range has been asked and returned
-  no scenes"* from *"this region/range has never been asked"* — without
-  it, empty regions would be re-searched forever. Scene records store
-  the **full STAC item JSON**, so re-fills and cloud-threshold changes
-  never re-hit the STAC API.
+  table distinguishes a region and range that was queried and returned
+  no scenes from one that was never queried; without it, empty regions
+  would be re-searched on every request. Scene records store the full
+  STAC item JSON, so re-fills and cloud-threshold changes do not
+  contact the STAC API again.
 
 ## The read path
 
@@ -107,10 +107,10 @@ several days takes on the order of 0.1–0.3 s (see the
 
 ## Concurrency model
 
-Downloads run under Dask's **in-process threaded scheduler**
-(`scheduler='threads'`), not a distributed cluster. This is deliberate:
-the workload is network-bound (S3 range reads), threads share the
-GDAL/CURL configuration set in the main process, and the distributed
-client exhibited a startup race in which workers opened assets before
-receiving the unsigned-S3 configuration (see
+Downloads run under Dask's in-process threaded scheduler
+(`scheduler='threads'`) rather than a distributed cluster. The choice
+is deliberate: the workload is network-bound (S3 range reads), threads
+share the GDAL/CURL configuration set in the main process, and the
+distributed client exhibited a startup race in which workers opened
+assets before receiving the unsigned-S3 configuration (see
 [Robustness](robustness.md)).

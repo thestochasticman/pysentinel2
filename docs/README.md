@@ -42,21 +42,23 @@ flowchart LR
 
 ## Design principles
 
-1. **One store per machine, keyed by grid position — not by query.**
-   Two studies over overlapping paddocks share pixels transparently.
+1. **One store per machine, keyed by grid position rather than by
+   query.** Two studies over overlapping areas share pixels
+   transparently.
 2. **The unit of work is the (solar-day × chunk) cell.** Downloads,
-   ledger entries and deduplication all operate on whole 256 × 256-pixel
-   chunks, so a cell recorded as done is bit-complete on disk.
+   ledger entries and deduplication all operate on whole
+   256 × 256-pixel chunks, so a cell recorded as done is complete on
+   disk.
 3. **Derived products are views, not copies.** Cloud masking and
-   spectral indices are cheap array transforms; persisting them would
-   double storage and freeze one choice of thresholds. Different
+   spectral indices are inexpensive array transforms; persisting them
+   would double storage and fix one choice of thresholds. Different
    thresholds are simply different reads of the same raw store.
-4. **Composition, no inheritance.** `Cube` is assembled from independent,
-   individually testable parts (`grid`, `Index`, `Paths`, `Sentinel2`) —
-   a convention shared across the Borevitz Lab packages.
+4. **Composition rather than inheritance.** `Cube` is assembled from
+   independent, individually testable parts (`grid`, `Index`, `Paths`,
+   `Sentinel2`), a convention shared across the Borevitz Lab packages.
 5. **Crash tolerance by construction.** Writes are whole-chunk and the
    ledger is transactional (SQLite/WAL); an interrupted fill leaves
-   cells unmarked, and the next run resumes exactly there.
+   cells unmarked, and the next run resumes from that point.
 
 ## Reproducing the figures
 

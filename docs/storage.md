@@ -1,8 +1,8 @@
 # Storage & index
 
-The store has two halves under one directory: a **sparse Zarr store**
-holding pixels and a **SQLite database** recording what those pixels
-are and how they got there.
+The store has two components under one directory: a sparse Zarr store
+holding pixel data, and a SQLite database recording what that data is
+and how it was obtained.
 
 ```
 {config.tmp_dir}/sentinel2_cube/
@@ -18,18 +18,18 @@ are and how they got there.
 
 ## The Zarr store
 
-Each solar-day group holds one array per band, **logically global**
-(3 473 920 × 1 465 344 px on the [fixed grid](grid.md)) but **physically
-sparse**: Zarr materialises only chunks that have been written. A band
-array chunked at 256 × 256 px means the on-disk chunk is exactly the
-grid's dedup unit.
+Each solar-day group holds one array per band, logically global
+(3 473 920 × 1 465 344 px on the [fixed grid](grid.md)) but physically
+sparse: Zarr materialises only chunks that have been written. Band
+arrays are chunked at 256 × 256 px, so the on-disk chunk coincides with
+the grid's unit of deduplication.
 
 - Reflectance bands are `int16` with nodata −999 (DEA ARD convention);
   `oa_fmask` is `uint8` with nodata 0. The nodata value is recorded as
-  an array attribute and doubles as the Zarr fill value, so *reading an
-  unwritten region yields nodata* — indistinguishable from a region the
-  satellite never sensed, which is exactly the semantics the
-  [cleaning pipeline](cleaning.md) assigns it.
+  an array attribute and doubles as the Zarr fill value, so reading an
+  unwritten region yields nodata — the same value as a region the
+  satellite never sensed, and the [cleaning pipeline](cleaning.md)
+  treats the two identically.
 - Grouping by **solar day** (the UTC acquisition time shifted by the
   scene-centre longitude in degrees, $t_{solar} = t_{UTC} + \lambda / 15$ hours)
   merges the two Sentinel-2 satellites and adjacent swath tiles into one
@@ -40,7 +40,7 @@ grid's dedup unit.
 
 ## The SQLite ledger
 
-Three tables, no pixels (`pysentinel2/index.py`):
+Three tables, none holding pixel data (`pysentinel2/index.py`):
 
 ```mermaid
 erDiagram
@@ -85,7 +85,8 @@ exist"* (a valid, cacheable answer) from *"never asked"*.
 
 ## Crash-safety semantics
 
-The ordering of operations makes interrupted fills harmless:
+The ordering of operations ensures that an interrupted fill cannot
+corrupt the store:
 
 ```mermaid
 sequenceDiagram
@@ -97,25 +98,25 @@ sequenceDiagram
     F->>S3: fetch missing cells (odc.stac.load)
     S3-->>F: pixel window
     F->>Z: write whole chunks
-    Note over Z: crash here ⇒ chunks on disk<br/>but unrecorded — harmless
+    Note over Z: a crash here leaves chunks written<br/>but unrecorded; they are re-fetched later
     F->>DB: mark_chunks(day, cells) — one transaction
     Note over DB: only now is the cell "done"
 ```
 
-- Pixels are written **before** the ledger row; the ledger commit is a
-  single WAL transaction. A crash at any point leaves cells unmarked —
-  the next run re-downloads and overwrites them idempotently (writes
-  are whole-chunk at fixed positions, so overwriting is bit-identical
-  convergence, not corruption).
-- The inverse failure (ledger row without pixels) cannot occur, because
-  `mark_chunks` runs only after the Zarr writes return.
+- Pixels are written before the ledger row, and the ledger commit is a
+  single WAL transaction. A crash at any point leaves cells unmarked,
+  and the next run re-downloads and overwrites them; because writes are
+  whole chunks at fixed grid positions, re-writing a cell reproduces
+  the same bytes rather than accumulating inconsistency.
+- The inverse failure — a ledger row without its pixels — cannot occur,
+  because `mark_chunks` runs only after the Zarr writes return.
 - WAL mode allows concurrent readers while a fill is in progress.
 
 ## Where the store lives
 
 Locations derive from the shared lab `Config`
-(`pysentinel2/paths.py`): the store is **per data root, not per
-query** — every query on the machine reads and fills the same cube.
+(`pysentinel2/paths.py`). The store is keyed by data root, not by
+query: every query on the machine reads and fills the same cube.
 
 ```python
 from pysentinel2.paths import Paths
@@ -124,5 +125,5 @@ paths.store              # .../sentinel2_cube/cube.zarr
 paths.index_db           # .../sentinel2_cube/index.db
 ```
 
-Deleting the `sentinel2_cube/` directory is always safe — it is a
-cache; the next query rebuilds exactly what it needs.
+The directory is a cache: deleting it loses no state that cannot be
+rebuilt, and subsequent queries re-download exactly what they need.

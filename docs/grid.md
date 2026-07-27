@@ -1,10 +1,11 @@
 # The grid
 
-Everything in the cube lives on **one fixed global grid, defined once**
-(`pysentinel2/grid.py`). This is the property that makes deduplication
-deterministic: any EPSG:4326 bounding box maps to exactly one set of
-chunk identifiers, so two overlapping queries *necessarily* resolve to
-overlapping chunk sets, and a chunk is only ever downloaded once.
+All data in the cube is stored on a single fixed global grid, defined
+once (`pysentinel2/grid.py`). This is the property that makes
+deduplication deterministic: any EPSG:4326 bounding box maps to exactly
+one set of chunk identifiers, so two overlapping queries necessarily
+resolve to overlapping chunk sets, and a chunk is downloaded at most
+once.
 
 ## Specification
 
@@ -18,9 +19,9 @@ overlapping chunk sets, and a chunk is only ever downloaded once.
 
 EPSG:6933 is cylindrical: easting depends only on longitude and northing
 only on latitude, both monotonically. Projecting the two corners of a
-geographic bounding box is therefore **exact** — no densification of the
-box edges is needed, which keeps the bbox → window mapping a closed-form
-computation.
+geographic bounding box is therefore exact — no densification of the
+box edges is needed, and the bbox-to-window mapping remains a
+closed-form computation.
 
 An equal-area CRS also means every pixel represents the same 100 m² of
 ground everywhere on the globe, so per-frame statistics (valid fraction,
@@ -44,9 +45,9 @@ $$
 $$
 
 The half-open pixel window $[\mathrm{row}_0, \mathrm{row}_1) \times
-[\mathrm{col}_0, \mathrm{col}_1)$ is **snapped outward to whole
-chunks** — it always contains the requested bbox and always consists of
-complete chunks. A chunk is identified by $(c_y, c_x) =
+[\mathrm{col}_0, \mathrm{col}_1)$ is snapped outward to whole chunks:
+it always contains the requested bbox and always consists of complete
+chunks. A chunk is identified by $(c_y, c_x) =
 (\mathrm{row}/256, \mathrm{col}/256)$.
 
 Because the window is chunk-aligned:
@@ -66,10 +67,10 @@ from the store.
 
 ![Two overlapping queries resolve to overlapping chunk sets](images/grid_dedup.png)
 
-This is the mechanism behind the zero-cost rows of the
+This is the mechanism behind the zero-download entries in the
 [performance table](../README.md#performance): a repeat request, or a
-request shifted within already-covered chunks, is answered entirely from
-the index and the local store.
+request shifted within already-covered chunks, is answered entirely
+from the index and the local store.
 
 ## Pinning downloads to the grid
 

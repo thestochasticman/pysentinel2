@@ -1,10 +1,10 @@
 # Spectral indices
 
-Indices are **on-read derivatives** (`pysentinel2/derive.py`): requested
+Indices are on-read derivatives (`pysentinel2/derive.py`): requested
 per call, computed from cloud-masked reflectance, and never stored —
 the same design as [cleaning](cleaning.md). Requesting any index
-implies `clean=True`, so formulas only ever see valid, uncontaminated
-pixels.
+implies `clean=True`, so the formulas operate only on valid,
+uncontaminated pixels.
 
 ```python
 ds = cube.get_ds(bbox, start, end, indices=('NDVI', 'NIRv', 'NDTI', 'CAI'))
