@@ -125,8 +125,9 @@ Live measurements against DEA — a ~2 × 2 km AOI, 11-band ARD at 10 m
 Store footprint: **13.6 MB for 11 solar days** — raw + fmask only, since
 the clean cube is a 0.1 s on-read transform rather than a second copy.
 
-Absolute times vary with network and DEA load; the zeros are the point —
-they are index lookups, no network involved.
+Absolute times vary with network and DEA load. The zero rows are the
+significant ones: those requests are resolved by index lookups alone,
+with no network access.
 
 ## Install
 
