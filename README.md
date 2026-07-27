@@ -13,6 +13,8 @@ science, indices, robustness — lives in [`docs/`](docs/README.md),**
 with flowcharts and figures generated from a real store.
 
 ![Every stored solar day for the example window](docs/images/cube_frames_rgb.png)
+*One store, every observation it holds for a 2 × 2 km window: clear,
+cloudy and off-swath days alike are stored raw and classified on read.*
 
 ## How it works
 
@@ -99,44 +101,12 @@ window through `pysentinel2.cube.clean_dataset`. The design principle:
 | Snow | 4 | Corrupts reflectance stats like cloud | → NaN by default (`mask_snow=False` to keep) |
 | Water | 5 | Legitimate signal (NDWI, dams, rivers) | kept by default (`mask_water=True` to drop) |
 
-![On-read cleaning of a cloudy frame](docs/images/cleaning_pipeline.png)
-
-**Pipeline, in order:**
-
-1. **Classify** every pixel from the fmask band (table above). Band
-   nodata values (−999) are additionally masked to NaN.
-2. **Dilate** the contaminated mask by `buffer_px` (default 3 px ≈ 30 m,
-   circular structuring element). fmask draws tight cloud boundaries;
-   the bright halo and penumbra just outside them are the classic
-   source of corrupted "clear" pixels.
-3. **Gate frames** on two independent, interpretable statistics:
-   - `cloud_fraction` = contaminated ÷ **valid** pixels. Frames above
-     `max_cloud_fraction` (default 0.5) are dropped. Because the
-     denominator is valid pixels, a cloud-free frame that only
-     partially overlaps the AOI is *not* penalised for its swath
-     margin.
-   - `valid_fraction` = valid ÷ all window pixels. Frames below
-     `min_valid_fraction` (default 0.2) are dropped — a sliver of
-     swath is not a usable observation, however clear.
-4. **Annotate**: both statistics attach to the result as `time`
-   coordinates, and the filter settings
-   (`max_cloud_fraction`, `min_valid_fraction`, `cloud_buffer_px`,
-   `masked_fmask_classes`) as dataset attrs — every frame's survival
-   is auditable after the fact.
-
-```python
-ds = cube.get_ds(bbox, start, end, clean=True,
-                 max_cloud_fraction=0.3,   # stricter: ≤30% contamination
-                 min_valid_fraction=0.5,   # ≥half the window sensed
-                 mask_water=True,          # e.g. for pure-vegetation stats
-                 buffer_px=5)              # wider halo exclusion
-
-ds.cloud_fraction    # (time,) — why each surviving frame survived
-ds.valid_fraction    # (time,)
-```
-
-Nothing here is persisted: different thresholds on the same window are
-just different reads of the same raw store.
+Contaminated pixels are dilated before masking, frames are gated on the
+two fractions independently, and every read is annotated with the
+statistics and thresholds that produced it. Nothing is persisted —
+different thresholds on the same window are just different reads of the
+same raw store. Full pipeline, tunables and figures:
+[docs/cleaning.md](docs/cleaning.md).
 
 ## Performance
 
@@ -185,11 +155,10 @@ available system-wide for `rasterio`/`rioxarray`, then the same two
 
 ## Robustness notes
 
-Hardening for DEA's public S3 + STAC quirks is built in (see
-`diagnostics.md`): STAC retries with backoff on cold-start 504s, GDAL
-low-speed timeouts so stalled reads abort instead of hanging, and
-`fail_on_error=False` so one corrupt tile costs a nodata gap rather
-than a whole day's fill.
+Hardening for DEA's public S3 + STAC quirks (cold-start 504s, stalled
+reads, corrupt tiles) is built in — see
+[docs/robustness.md](docs/robustness.md) and, for the underlying
+investigations, [`diagnostics.md`](diagnostics.md).
 
 ## Test
 

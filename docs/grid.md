@@ -87,15 +87,3 @@ and passes it to `odc.stac.load`, which reprojects each source asset
 (UTM-zoned Sentinel-2 tiles) onto exactly this window. Downloaded pixels
 therefore land at their single canonical grid position — the same
 ground cell requested twice yields byte-identical array slices.
-
-## Testing
-
-The grid module is pure math and fully testable offline:
-
-```bash
-python pysentinel2/grid.py   # → True
-```
-
-covering chunk alignment, bbox containment, chunk sharing between
-overlapping boxes, EPSG:4326 round-trips, and coordinate-array
-consistency.

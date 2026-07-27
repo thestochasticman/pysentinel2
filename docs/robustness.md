@@ -15,29 +15,11 @@ shell reproductions, are recorded in
 | `RasterioIOError('Unsupported Authorization Type')` from a worker | On `dask` distributed clusters, the unsigned-S3 GDAL configuration broadcast can race the first task, so a worker opens an asset with default auth settings | In-process **threaded** scheduler only — workers share the main process's GDAL/CURL configuration by construction; no broadcast exists to race |
 | One corrupt/unreadable tile aborts a whole day's fill | `odc.stac.load` defaults to fail-fast | `fail_on_error=False`: a bad asset costs a nodata gap in that band, not the fill |
 
-## Retry behaviour on a cold STAC cache
-
-```mermaid
-sequenceDiagram
-    participant C as Cube._search_stac
-    participant R as urllib3.Retry
-    participant S as DEA STAC
-
-    C->>S: search request
-    S-->>R: 504 (cold cache, ~30 s)
-    Note over R: backoff 1 s
-    R->>S: retry 1
-    S-->>R: 504
-    Note over R: backoff 2 s … 4 s … 8 s
-    R->>S: retry n
-    S-->>C: 200 — items
-    Note over C: total backoff budget ≈ 15 s —<br/>covers the observed warm-up window
-```
-
-Because search results (full STAC item JSON) are cached in the
-[index](storage.md), this cost is paid at most once per new
-region/date-range; every later request over covered extents performs no
-STAC traffic at all.
+The cumulative retry backoff (≈ 15 s) covers DEA's observed ~30 s
+warm-up window without hammering the endpoint. Because search results
+(full STAC item JSON) are cached in the [index](storage.md), this cost
+is paid at most once per new region/date-range; every later request
+over covered extents performs no STAC traffic at all.
 
 ## GDAL/CURL environment
 
