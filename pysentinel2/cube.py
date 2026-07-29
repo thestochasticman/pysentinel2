@@ -77,56 +77,67 @@ def clean_dataset(ds: Dataset, sentinel2: Sentinel2 = defaultsentinel2,
                   min_valid_fraction: float = 0.2,
                   mask_snow: bool = True,
                   mask_water: bool = False,
-                  buffer_px: int = 3) -> Dataset:
+                  buffer_px: int = 5) -> Dataset:
     """Cloud-mask a raw cube window and drop unusable frames.
 
-    The mask distinguishes *invalid* pixels (fmask nodata — outside the
-    scene footprint or never sensed) from *contaminated* pixels (cloud,
-    shadow, optionally snow/water), because they mean different things
-    for frame quality:
+    Three pixel roles are kept distinct, because they mean different
+    things for frame quality:
 
-    - ``cloud_fraction`` — contaminated share of the *valid* pixels.
-      Frames above ``max_cloud_fraction`` are dropped. A frame with a
-      large off-swath margin but clear sky is NOT penalised (the old
-      NaN-fraction rule conflated the two and threw away good frames).
-    - ``valid_fraction`` — share of the window with data at all. Frames
-      below ``min_valid_fraction`` are dropped (a sliver of swath isn't
-      a usable observation, however clear).
+    - *invalid* (fmask nodata — outside the scene footprint or never
+      sensed) counts against ``valid_fraction`` only;
+    - *contaminated* (cloud and shadow) drives both the per-pixel mask
+      and the ``cloud_fraction`` frame gate;
+    - *snow and water* are correctly classified surface states, not
+      sensing failures: they are masked per pixel (snow by default,
+      water on request) but never count toward the frame gate — a
+      cloud-free, fully snow-covered frame survives as an observation
+      (analysis/ finding 2: the previous conflation dropped 16 of 37
+      usable alpine winter frames).
 
-    Contaminated pixels are dilated by ``buffer_px`` (circular
-    structuring element) before masking, so bright cloud-edge halos and
-    penumbra that fmask misses are excluded too. Snow is masked by
-    default (it corrupts reflectance statistics like cloud does); water
-    is kept by default (legitimate signal for water/NDWI work).
+    Frames are dropped when ``cloud_fraction`` (cloud+shadow share of
+    the valid pixels) exceeds ``max_cloud_fraction`` or
+    ``valid_fraction`` (valid share of the window) falls below
+    ``min_valid_fraction``.
 
-    Both per-frame statistics are attached as ``time`` coordinates
-    (``cloud_fraction``, ``valid_fraction``) on the returned dataset, so
-    downstream consumers can see why frames survived. Computed on read,
-    never stored — the clean cube costs no disk.
+    Cloud and shadow are dilated by ``buffer_px`` (circular structuring
+    element) before masking, excluding the bright halo and penumbra that
+    fmask misses; the measured edge bias supports the default of 5 px
+    (analysis/ finding 3). Snow and water are masked without dilation.
+
+    Per-frame statistics attach as ``time`` coordinates
+    (``cloud_fraction``, ``valid_fraction``, ``snow_fraction``) so
+    downstream consumers can see why frames survived and filter on snow
+    explicitly. Computed on read, never stored.
     """
     fmask = ds[sentinel2.cloud_mask_band].values
     time_dims = ds[sentinel2.cloud_mask_band].dims
 
     valid = fmask != sentinel2.fmask_nodata
-    bad_classes = [sentinel2.fmask_cloud, sentinel2.fmask_shadow]
-    if mask_snow:
-        bad_classes.append(sentinel2.fmask_snow)
-    if mask_water:
-        bad_classes.append(sentinel2.fmask_water)
-    bad = np.isin(fmask, bad_classes)
+    gate = np.isin(fmask, [sentinel2.fmask_cloud, sentinel2.fmask_shadow])
 
     if buffer_px:
         from scipy.ndimage import binary_dilation
         yy, xx = np.ogrid[-buffer_px:buffer_px + 1, -buffer_px:buffer_px + 1]
         disk = (yy ** 2 + xx ** 2) <= buffer_px ** 2
-        bad = np.stack([binary_dilation(frame, structure=disk) for frame in bad])
+        gate = np.stack([binary_dilation(frame, structure=disk) for frame in gate])
 
-    bad &= valid                       # nodata is invalid, not "cloudy"
-    clear = valid & ~bad
+    gate &= valid                      # nodata is invalid, not "cloudy"
+    snow = (fmask == sentinel2.fmask_snow) & valid
+
+    masked_classes = [sentinel2.fmask_cloud, sentinel2.fmask_shadow]
+    mask = gate
+    if mask_snow:
+        mask = mask | snow
+        masked_classes.append(sentinel2.fmask_snow)
+    if mask_water:
+        mask = mask | ((fmask == sentinel2.fmask_water) & valid)
+        masked_classes.append(sentinel2.fmask_water)
+    clear = valid & ~mask
 
     n_valid = valid.sum(axis=(1, 2))
     valid_frac = n_valid / (valid.shape[1] * valid.shape[2])
-    cloud_frac = np.where(n_valid > 0, bad.sum(axis=(1, 2)) / np.maximum(n_valid, 1), 1.0)
+    cloud_frac = np.where(n_valid > 0, gate.sum(axis=(1, 2)) / np.maximum(n_valid, 1), 1.0)
+    snow_frac = np.where(n_valid > 0, snow.sum(axis=(1, 2)) / np.maximum(n_valid, 1), 0.0)
     keep = (valid_frac >= min_valid_fraction) & (cloud_frac <= max_cloud_fraction)
 
     nodatas = {name: ds[name].attrs.get('nodata') for name in ds.data_vars
@@ -140,6 +151,7 @@ def clean_dataset(ds: Dataset, sentinel2: Sentinel2 = defaultsentinel2,
     ds = ds.assign_coords(
         valid_fraction=('time', np.round(valid_frac, 4)),
         cloud_fraction=('time', np.round(cloud_frac, 4)),
+        snow_fraction=('time', np.round(snow_frac, 4)),
     )
     ds = ds.isel(time=np.flatnonzero(keep))
 
@@ -148,8 +160,35 @@ def clean_dataset(ds: Dataset, sentinel2: Sentinel2 = defaultsentinel2,
         max_cloud_fraction=max_cloud_fraction,
         min_valid_fraction=min_valid_fraction,
         cloud_buffer_px=buffer_px,
-        masked_fmask_classes=sorted(bad_classes),
+        frame_gate_classes=[sentinel2.fmask_cloud, sentinel2.fmask_shadow],
+        masked_fmask_classes=sorted(masked_classes),
     )
+
+
+def _chunks_passing_screen(fm: np.ndarray, window, sentinel2: Sentinel2,
+                           threshold: float | None = None) -> list[tuple[int, int]]:
+    """Chunk ids in ``window`` whose fmask justifies a reflectance download.
+
+    A chunk passes when it has valid pixels and its cloud+shadow share
+    of them is at most ``sentinel2.screen_cloud_fraction``. The decision
+    is a pure function of the chunk's own fmask, so it is deterministic:
+    a screened-out cell would be screened out identically by any later
+    query, and the index can mark it done.
+    """
+    thr = sentinel2.screen_cloud_fraction if threshold is None else threshold
+    row0, _, col0, _ = window
+    passing = []
+    for cy, cx in grid.chunks_in_window(window):
+        r, c = cy * grid.CHUNK - row0, cx * grid.CHUNK - col0
+        sub = fm[r:r + grid.CHUNK, c:c + grid.CHUNK]
+        valid = sub != sentinel2.fmask_nodata
+        n_valid = int(valid.sum())
+        if n_valid == 0:
+            continue
+        bad = np.isin(sub, [sentinel2.fmask_cloud, sentinel2.fmask_shadow]) & valid
+        if bad.sum() / n_valid <= thr:
+            passing.append((cy, cx))
+    return passing
 
 
 @frozen
@@ -249,61 +288,94 @@ class Cube:
         ])
         ix.record_search(bbox6933, start, end)
 
-    def _download_day(s, day: str, item_dicts: list[dict], window, threads: int) -> None:
-        """Fetch one solar day's pixels for ``window`` and write them into
-        the day's global-grid arrays. Chunk-aligned, so writes are whole
-        chunks and the index rows marked afterwards are truthful."""
+    def _load_day(s, items, bands, window, threads):
+        """One solar day's pixels for ``bands`` over ``window``, collapsed
+        to a single timestep (None if the day yields no data)."""
         import odc.stac
-        import pystac
-        _configure_rio()
-
-        items = [pystac.Item.from_dict(d) for d in item_dicts]
         # In-process threaded scheduler — no distributed cluster (see the
         # deadlock notes in diagnostics.md).
         with dask.config.set(scheduler='threads', num_workers=threads):
             ds: Dataset = odc.stac.load(
                 items,
-                bands=s.sentinel2.bands,
+                bands=bands,
                 geobox=grid.geobox_for_window(window),
                 groupby=s.sentinel2.groupby,
                 chunks={'time': 1, 'x': grid.CHUNK, 'y': grid.CHUNK},
                 # One corrupt DEA tile costs a nodata gap, not the whole day.
                 fail_on_error=False,
             ).compute()
-
         if ds.time.size == 0:
-            data_slice = None
-        else:
-            # Items were grouped by solar day before the call, so expect one
-            # timestep; collapse defensively if odc still yields several.
-            data_slice = ds.isel(time=0) if ds.time.size == 1 else ds.max(dim='time', keep_attrs=True)
+            return None
+        # Items were grouped by solar day before the call, so expect one
+        # timestep; collapse defensively if odc still yields several.
+        return ds.isel(time=0) if ds.time.size == 1 else ds.max(dim='time', keep_attrs=True)
+
+    @staticmethod
+    def _write_band(day_group, band, da, window, default_dtype, default_nodata):
+        dtype = da.dtype if da is not None else default_dtype
+        nodata = da.attrs.get('nodata') if da is not None else None
+        if nodata is None:
+            nodata = 0 if dtype.kind == 'u' else default_nodata
+        try:
+            arr = day_group[band]
+        except KeyError:
+            arr = day_group.create_array(
+                band,
+                shape=(grid.HEIGHT_PX, grid.WIDTH_PX),
+                chunks=(grid.CHUNK, grid.CHUNK),
+                dtype=dtype,
+                fill_value=nodata,
+            )
+            arr.attrs['nodata'] = int(nodata)
+        if da is not None:
+            row0, row1, col0, col1 = window
+            arr[row0:row1, col0:col1] = da.values
+
+    def _download_day(s, day: str, item_dicts: list[dict], window, threads: int) -> None:
+        """Fetch one solar day for ``window`` and write it into the day's
+        global-grid arrays, fmask first.
+
+        Two phases, both chunk-aligned:
+
+        1. Download the fmask band for the whole window and write it —
+           the cheap band (it compresses ~50x) is always stored.
+        2. Screen each chunk on its own fmask statistics
+           (:func:`_chunks_passing_screen`); reflectance bands are
+           downloaded only for the window of passing chunks. Screened
+           chunks keep their real fmask and read as nodata reflectance,
+           and ``clean_dataset`` drops such frames via the same fmask.
+
+        Because the screen is deterministic per chunk, every chunk in
+        ``window`` — passing or screened — is safely marked done by the
+        caller.
+        """
+        import pystac
+        _configure_rio()
+        items = [pystac.Item.from_dict(d) for d in item_dicts]
 
         root = zarr.open_group(s.paths.store, mode='a')
         try:
             day_group = root[day]
         except KeyError:
             day_group = root.create_group(day)
-        row0, row1, col0, col1 = window
-        for band in s.sentinel2.bands:
-            da = data_slice[band] if data_slice is not None else None
-            dtype = da.dtype if da is not None else np.dtype('int16')
-            nodata = (da.attrs.get('nodata') if da is not None else None)
-            if nodata is None:
-                nodata = 0 if dtype.kind == 'u' else -999
-            try:
-                arr = day_group[band]
-            except KeyError:
-                arr = day_group.create_array(
-                    band,
-                    shape=(grid.HEIGHT_PX, grid.WIDTH_PX),
-                    chunks=(grid.CHUNK, grid.CHUNK),
-                    dtype=dtype,
-                    fill_value=nodata,
-                )
-                arr.attrs['nodata'] = int(nodata)
-            if da is not None:
-                arr[row0:row1, col0:col1] = da.values
         day_group.attrs['crs'] = grid.CRS
+
+        fmask_band = s.sentinel2.cloud_mask_band
+        fm_slice = s._load_day(items, [fmask_band], window, threads)
+        fm = fm_slice[fmask_band] if fm_slice is not None else None
+        s._write_band(day_group, fmask_band, fm, window, np.dtype('uint8'), 0)
+        if fm is None:
+            return
+
+        passing = _chunks_passing_screen(fm.values, window, s.sentinel2)
+        if not passing:
+            return
+        sub = grid.window_of_chunks(passing)
+        bands = [b for b in s.sentinel2.bands if b != fmask_band]
+        data = s._load_day(items, bands, sub, threads)
+        for band in bands:
+            da = data[band] if data is not None else None
+            s._write_band(day_group, band, da, sub, np.dtype('int16'), -999)
 
     # -- read -------------------------------------------------------------
 
@@ -380,7 +452,18 @@ class Cube:
                 continue  # a searched day with no scenes written
             kept_days.append(day)
             for band in s.sentinel2.bands:
-                arr = day_group[band]
+                try:
+                    arr = day_group[band]
+                except KeyError:
+                    # A screened day: fmask was stored, reflectance was
+                    # never fetched — read as nodata.
+                    is_mask = band == s.sentinel2.cloud_mask_band
+                    fill = 0 if is_mask else -999
+                    nodata.setdefault(band, fill)
+                    bands[band].append(np.full(
+                        (row1 - row0, col1 - col0), fill,
+                        dtype='uint8' if is_mask else 'int16'))
+                    continue
                 nodata[band] = arr.attrs.get('nodata', arr.fill_value)
                 bands[band].append(arr[row0:row1, col0:col1])
 
@@ -549,6 +632,34 @@ def test_snow_masked_water_kept_by_default():
     )
 
 
+def test_snow_excluded_from_frame_gate():
+    """A cloud-free frame that is 75% snow must survive the gate with its
+    snow pixels masked and its snow_fraction reported (analysis/ finding 2)."""
+    fmask = np.ones((1, 40, 40))
+    fmask[0, :30, :] = defaultsentinel2.fmask_snow
+    ds = clean_dataset(_synthetic_window(fmask), buffer_px=0)
+    return (
+        ds.time.size == 1
+        and float(ds.cloud_fraction[0]) == 0.0
+        and abs(float(ds.snow_fraction[0]) - 0.75) < 1e-6
+        and bool(np.isnan(ds['nbart_red'][0, 0, 0]))       # snow pixel masked
+        and float(ds['nbart_red'][0, 35, 0]) == 4000.0     # clear pixel kept
+    )
+
+
+def test_screen_passes_clear_rejects_cloudy_chunks():
+    """Per-chunk download screen: clear and off-swath chunks decided
+    correctly, threshold honoured."""
+    from pysentinel2.cube import _chunks_passing_screen
+    win = (0, grid.CHUNK, 0, 3 * grid.CHUNK)                 # 1 x 3 chunks
+    fm = np.ones((grid.CHUNK, 3 * grid.CHUNK), dtype='uint8')
+    fm[:, grid.CHUNK:2 * grid.CHUNK] = defaultsentinel2.fmask_cloud   # chunk 1 fully cloudy
+    fm[:, 2 * grid.CHUNK:] = defaultsentinel2.fmask_nodata            # chunk 2 off-swath
+    passing = _chunks_passing_screen(fm, win, defaultsentinel2)
+    all_pass = _chunks_passing_screen(fm, win, defaultsentinel2, threshold=1.0)
+    return passing == [(0, 0)] and all_pass == [(0, 0), (0, 1)]
+
+
 def test_query_adapters_match_agnostic_calls():
     """get_ds_query/fill_query are pure delegations to the bbox+dates core."""
     from borevitz_lab.query import Query
@@ -576,6 +687,8 @@ def test():
         test_sliver_frame_dropped(),
         test_cloud_buffer_dilates(),
         test_snow_masked_water_kept_by_default(),
+        test_snow_excluded_from_frame_gate(),
+        test_screen_passes_clear_rejects_cloudy_chunks(),
         test_query_adapters_match_agnostic_calls(),
     ])
 

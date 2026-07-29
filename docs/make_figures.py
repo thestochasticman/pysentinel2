@@ -91,14 +91,21 @@ def style_map_ax(ax):
         sp.set_linewidth(0.8)
 
 
-# ---- 1. every frame in the cube window ------------------------------------
-n = ds.time.size
-ncols, nrows = 4, int(np.ceil(n / 4))
+# ---- 1. every sensed frame in the cube window -----------------------------
+sensed = [i for i in range(ds.time.size) if valid_frac[i] > 0]
+n_off = ds.time.size - len(sensed)
+ncols = 4
+nrows = int(np.ceil((len(sensed) + 1) / ncols))
 fig, axes = plt.subplots(nrows, ncols, figsize=(9.6, 2.55 * nrows))
-for i, ax in enumerate(axes.flat):
-    if i >= n:
+for k, ax in enumerate(axes.flat):
+    if k >= len(sensed):
         ax.axis('off')
+        if k == len(sensed):
+            ax.text(0.5, 0.5, f'+ {n_off} stored days\nentirely off-swath\n(valid = 0)',
+                    transform=ax.transAxes, fontsize=9, color=INK2,
+                    ha='center', va='center')
         continue
+    i = sensed[k]
     img = rgb(ds.isel(time=i))
     img_show = np.where(np.isnan(img), 0.93, img)
     ax.imshow(img_show)
@@ -107,7 +114,7 @@ for i, ax in enumerate(axes.flat):
     ax.text(0.02, 0.03, f'cloud {cloud_frac[i]:.0%} · valid {valid_frac[i]:.0%}',
             transform=ax.transAxes, fontsize=7.2, color=INK2,
             bbox=dict(facecolor='white', alpha=0.85, edgecolor='none', pad=1.6))
-fig.suptitle('Every solar day stored for the example window (true colour, 512 × 512 px @ 10 m)',
+fig.suptitle('Every sensed solar day stored for the example window (true colour, 512 × 512 px @ 10 m)',
              fontsize=11, color=INK, y=1.0)
 fig.tight_layout(rect=(0, 0, 1, 0.985))
 fig.savefig(f'{OUT}/cube_frames_rgb.png', bbox_inches='tight')
@@ -121,11 +128,12 @@ frame = ds.isel(time=ci)
 fm = frame[s2.cloud_mask_band].values
 
 valid = fm != s2.fmask_nodata
-bad_raw = np.isin(fm, [s2.fmask_cloud, s2.fmask_shadow, s2.fmask_snow])
-r = 3
+bad_raw = np.isin(fm, [s2.fmask_cloud, s2.fmask_shadow])
+r = 5
 yy, xx = np.ogrid[-r:r + 1, -r:r + 1]
 disk = (yy ** 2 + xx ** 2) <= r ** 2
 bad_dil = binary_dilation(bad_raw, structure=disk) & valid
+bad_dil |= (fm == s2.fmask_snow) & valid          # snow masked, undilated
 
 class_colors = {0: GRID, 1: AQUA, 2: YELLOW, 3: VIOLET, 4: MAGENTA, 5: BLUE}
 class_names = {0: 'nodata (0)', 1: 'clear (1)', 2: 'cloud (2)',
@@ -150,15 +158,15 @@ halo = bad_dil & ~bad_raw
 overlay[bad_raw] = matplotlib.colors.to_rgba(YELLOW, 0.75)
 overlay[halo] = matplotlib.colors.to_rgba(ORANGE, 0.75)
 axes[2].imshow(overlay, interpolation='nearest')
-axes[2].set_title('c  contaminated mask, dilated 3 px', loc='left', fontsize=9.5, color=INK)
+axes[2].set_title('c  contaminated mask, dilated 5 px', loc='left', fontsize=9.5, color=INK)
 axes[3].imshow(img_clean_show)
 axes[3].set_title('d  cleaned observation', loc='left', fontsize=9.5, color=INK)
 for ax in axes:
     style_map_ax(ax)
 
 legend1 = [Patch(facecolor=class_colors[k], label=class_names[k]) for k in range(6)]
-legend2 = [Patch(facecolor=YELLOW, label='fmask cloud/shadow/snow'),
-           Patch(facecolor=ORANGE, label='+ 3 px dilation halo'),
+legend2 = [Patch(facecolor=YELLOW, label='fmask cloud/shadow'),
+           Patch(facecolor=ORANGE, label='+ 5 px dilation halo'),
            Patch(facecolor='#ededec', label='masked → NaN')]
 fig.legend(handles=legend1 + legend2, loc='lower center', ncol=5, frameon=False,
            fontsize=8, bbox_to_anchor=(0.5, -0.06))
@@ -189,7 +197,7 @@ n_stack = int((keep & (cloud_frac < 0.02)).sum())
 ax.annotate(f'{n_stack} clear frames', (1.0, 0.0),
             textcoords='offset points', xytext=(-10, 8), fontsize=7.8,
             color=INK2, ha='right')
-for i in range(n):
+for i in range(ds.time.size):
     if valid_frac[i] > 0 and cloud_frac[i] > 0.1:
         ax.annotate(days[i], (valid_frac[i], cloud_frac[i]),
                     textcoords='offset points', xytext=(-10, -3),

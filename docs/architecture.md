@@ -64,13 +64,32 @@ flowchart TD
     E --> F
     F --> G{"for each solar day:<br/>wanted − chunks_done ≠ ∅?"}
     G -- "no missing cells" --> K["skip day — no network traffic"]
-    G -- "missing cells" --> H["odc.stac.load pinned to the<br/>window's GeoBox — chunk-aligned"]
-    H --> I["write whole chunks into the<br/>day's global Zarr arrays"]
+    G -- "missing cells" --> H1["download fmask band only<br/>for the missing window; write it"]
+    H1 --> H2["screen each chunk on its own fmask:<br/>cloud+shadow ≤ screen_cloud_fraction?"]
+    H2 -- "passing chunks" --> H3["download reflectance bands<br/>for the passing window only"]
+    H2 -- "screened chunks" --> I
+    H3 --> I["write whole chunks into the<br/>day's global Zarr arrays"]
     I --> J["index.mark_chunks (transactional)"]
     J --> G
     K --> G
     G -- "all days done" --> L["return number of cells downloaded<br/>(0 = fully served from cache)"]
 ```
+
+The download is **fmask-first**: the cheap classification band (it
+compresses ~50×) is fetched and stored for every candidate day, and the
+ten reflectance bands are fetched only for chunks whose own fmask shows
+a cloud+shadow share of valid pixels at most
+`Sentinel2.screen_cloud_fraction` (default 0.9). Fully overcast and
+off-swath chunks therefore cost one band, not eleven. The screen is a
+pure function of each chunk's fmask, so the decision is deterministic
+and every chunk — screened or not — is marked done. Screened cells keep
+their real fmask and read as nodata reflectance; `clean_dataset` drops
+such frames from the same fmask. This replaces reliance on the STAC
+granule-level `eo:cloud_cover` property, which the
+[difficult-region survey](../analysis/README.md) found to exclude 18 %
+of usable frames at the previous default of 30 (the property describes
+a ~100 × 100 km granule, not the requested window); the scene filter
+remains only as a loose prefilter (`max_cloud_cover = 80`).
 
 Two properties underpin the correctness of the scheme:
 

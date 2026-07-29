@@ -137,9 +137,14 @@ cloudy frame may itself carry residual contamination.
 
 ## Summary of recommended changes
 
-| Parameter | Current | Recommended | Basis |
+All recommendations below are implemented as of the commit that
+introduced them (fmask-first screening in `Cube._download_day` with
+`Sentinel2.screen_cloud_fraction = 0.9`, snow decoupled from the frame
+gate with a `snow_fraction` coordinate, and the revised defaults).
+
+| Parameter | Previous | Adopted | Basis |
 |---|---|---|---|
-| `Sentinel2.max_cloud_cover` | 30 | 80, or fmask-first adaptive fill | Finding 1 |
+| `Sentinel2.max_cloud_cover` | 30 | 80 (loose prefilter); fmask-first adaptive fill added | Finding 1 |
 | `cloud_fraction` gate composition | cloud + shadow + snow | cloud + shadow only; separate `snow_fraction` coordinate | Finding 2 |
 | `clean_dataset` `buffer_px` | 3 | 5 (8–10 for visible-band radiometry) | Finding 3 |
 | `max_cloud_fraction` | 0.5 | unchanged | Finding 4 |

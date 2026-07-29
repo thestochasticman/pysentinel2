@@ -98,7 +98,7 @@ window through `pysentinel2.cube.clean_dataset`. The design principle:
 | Clear | 1 | Usable land observation | kept |
 | Cloud | 2 | Contaminated | → NaN (dilated) |
 | Shadow | 3 | Contaminated | → NaN (dilated) |
-| Snow | 4 | Corrupts reflectance stats like cloud | → NaN by default (`mask_snow=False` to keep) |
+| Snow | 4 | Surface state; corrupts vegetation statistics | → NaN by default (`mask_snow=False` to keep); never counts toward the frame gate |
 | Water | 5 | Legitimate signal (NDWI, dams, rivers) | kept by default (`mask_water=True` to drop) |
 
 Contaminated pixels are dilated before masking, frames are gated on the

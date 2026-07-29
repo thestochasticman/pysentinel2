@@ -30,6 +30,11 @@ the grid's unit of deduplication.
   unwritten region yields nodata — the same value as a region the
   satellite never sensed, and the [cleaning pipeline](cleaning.md)
   treats the two identically.
+- Because fills are [fmask-first](architecture.md#the-fill-algorithm),
+  a day group always holds the fmask array, while reflectance arrays
+  exist only where at least one chunk passed the download screen; the
+  read path returns nodata for reflectance bands that were screened
+  out.
 - Grouping by **solar day** (the UTC acquisition time shifted by the
   scene-centre longitude in degrees, $t_{solar} = t_{UTC} + \lambda / 15$ hours)
   merges the two Sentinel-2 satellites and adjacent swath tiles into one

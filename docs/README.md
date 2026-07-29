@@ -31,7 +31,7 @@ flowchart LR
     Q["bbox + date range<br/>(EPSG:4326)"] --> W["grid.window_for_bbox<br/>chunk-aligned pixel window"]
     W --> D{"index:<br/>all (day × chunk)<br/>cells populated?"}
     D -- "no" --> S["STAC search<br/>(cached in index)"]
-    S --> F["odc.stac.load —<br/>missing cells only"]
+    S --> F["fmask-first load —<br/>missing cells only,<br/>reflectance where fmask passes"]
     F --> Z[("cube.zarr<br/>sparse global arrays")]
     F --> M["index.mark_chunks"]
     D -- "yes" --> R["read window<br/>from Zarr"]
