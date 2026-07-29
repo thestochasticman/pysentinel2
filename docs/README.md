@@ -12,6 +12,7 @@ cover how and why it works.
 | [Cleaning & masking](cleaning.md) | The fmask-based on-read cleaning pipeline: classification, dilation, frame gating |
 | [Spectral indices](indices.md) | On-read index derivation: NDVI, NIRv, NDTI, CAI, CFI — formulas and provenance |
 | [Robustness](robustness.md) | Hardening against DEA STAC/S3 failure modes (see also [`diagnostics.md`](../diagnostics.md)) |
+| [Parameter analysis](../analysis/README.md) | Difficult-region survey (snow, persistent cloud, coast) behind the download and cleaning defaults |
 
 All figures are generated from a real store over one example window —
 an irrigated cropping area near Grenfell, New South Wales
