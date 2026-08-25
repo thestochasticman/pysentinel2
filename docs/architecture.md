@@ -52,7 +52,10 @@ lab's reproducibility layer plug in without translation code.
 ## The `fill` algorithm
 
 `fill()` is the write path; `get_ds()` is `fill()` followed by a read.
-The unit of accounting throughout is the (solar-day × chunk) cell.
+The unit of *accounting* is the (solar-day × chunk) cell; the unit of
+*network work* is a multi-day **batch**, so one dask graph carries
+enough (day × chunk × band) tasks to keep every I/O thread busy across
+day boundaries.
 
 ```mermaid
 flowchart TD
@@ -62,18 +65,24 @@ flowchart TD
     D --> E["upsert full item JSON per scene;<br/>record the search extent"]
     C -- "yes" --> F["index.scenes_for_range:<br/>solar days ≤ max_cloud_cover"]
     E --> F
-    F --> G{"for each solar day:<br/>wanted − chunks_done ≠ ∅?"}
-    G -- "no missing cells" --> K["skip day — no network traffic"]
-    G -- "missing cells" --> H1["download fmask band only<br/>for the missing window; write it"]
-    H1 --> H2["screen each chunk on its own fmask:<br/>cloud+shadow ≤ screen_cloud_fraction?"]
-    H2 -- "passing chunks" --> H3["download reflectance bands<br/>for the passing window only"]
-    H2 -- "screened chunks" --> I
-    H3 --> I["write whole chunks into the<br/>day's global Zarr arrays"]
-    I --> J["index.mark_chunks (transactional)"]
-    J --> G
-    K --> G
-    G -- "all days done" --> L["return number of cells downloaded<br/>(0 = fully served from cache)"]
+    F --> G["plan: wanted − chunks_done<br/>per day → list of missing cells"]
+    G --> H1["<b>pass 1 — fmask, bulk</b><br/>one odc.stac.load per ≤64-day batch;<br/>write each day's fmask"]
+    H1 --> H2["screen each (day, chunk) on its own fmask:<br/>cloud+shadow ≤ screen_cloud_fraction?"]
+    H2 -- "day fully screened /<br/>no data" --> J
+    H2 -- "passing chunks" --> H3["<b>pass 2 — reflectance, bulk</b><br/>group days by passing window;<br/>one odc.stac.load per ≤64-day group"]
+    H3 --> I["write whole chunks into each<br/>day's global Zarr arrays"]
+    I --> J["index.mark_chunks per day, transactional,<br/><i>after</i> that day's pixels are on disk"]
+    J --> L["return number of cells downloaded<br/>(0 = fully served from cache)"]
 ```
+
+Batch sizes are capped by window area (~1 GB in flight for the uint8
+fmask pass, ~1.5 GB for the int16 reflectance pass), so small AOIs get
+maximal batching while large AOIs degrade gracefully toward per-day
+loads. Batching replaced a strictly per-day loop whose loads had too
+few tasks to occupy the thread pool: multi-year fills paid ~1–2 s of
+serial round-trip latency per solar day — and far worse whenever the
+DEA endpoint degraded, since every slow request blocked the queue
+instead of overlapping hundreds of others.
 
 The download is **fmask-first**: the cheap classification band (it
 compresses ~50×) is fetched and stored for every candidate day, and the

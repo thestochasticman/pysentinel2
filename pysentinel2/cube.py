@@ -56,14 +56,16 @@ for _k, _v in _GDAL_HTTP_CONFIG.items():
     os.environ.setdefault(_k, _v)
 
 _rio_configured = False
+_rio_lock = __import__('threading').Lock()
 
 
 def _configure_rio():
     global _rio_configured
-    if not _rio_configured:
-        import odc.stac
-        odc.stac.configure_rio(cloud_defaults=True, aws={"aws_unsigned": True}, **_GDAL_HTTP_CONFIG)
-        _rio_configured = True
+    with _rio_lock:
+        if not _rio_configured:
+            import odc.stac
+            odc.stac.configure_rio(cloud_defaults=True, aws={"aws_unsigned": True}, **_GDAL_HTTP_CONFIG)
+            _rio_configured = True
 
 
 def _solar_day(item) -> str:
@@ -191,6 +193,25 @@ def _chunks_passing_screen(fm: np.ndarray, window, sentinel2: Sentinel2,
     return passing
 
 
+def _day_group(root, day: str):
+    """The zarr group for ``day``, created on first use."""
+    try:
+        group = root[day]
+    except KeyError:
+        group = root.create_group(day)
+    group.attrs['crs'] = grid.CRS
+    return group
+
+
+def _crop_to_window(ds: Dataset, outer, inner) -> Dataset:
+    """Crop a dataset loaded on pixel window ``outer`` down to ``inner``."""
+    if outer == inner:
+        return ds
+    row0, _, col0, _ = outer
+    r0, r1, c0, c1 = inner
+    return ds.isel(y=slice(r0 - row0, r1 - row0), x=slice(c0 - col0, c1 - col0))
+
+
 @frozen
 class Cube:
     """The machine-wide Sentinel-2 store: one grid, one index, zero re-downloads.
@@ -225,7 +246,8 @@ class Cube:
 
     # -- fill -------------------------------------------------------------
 
-    def fill(s, bbox: list[float], start: date, end: date, threads: int = 8) -> int:
+    def fill(s, bbox: list[float], start: date, end: date, threads: int = 8,
+             batch_days: int = 64) -> int:
         """Ensure every (day x chunk) cell covering ``bbox`` x ``[start, end]``
         is populated.
 
@@ -235,6 +257,24 @@ class Cube:
         0 means the request was already fully covered and no network was
         touched (beyond a STAC search if this exact region/range was never
         searched before).
+
+        The unit of network work is a multi-day *batch*, not a day. A
+        single day's load has too few dask tasks (bands x chunks of a
+        typically small window) to keep the I/O threads busy, so per-day
+        loads left the connection idle between round-trips and multi-year
+        fills paid ~1-2 s of latency per solar day. Instead:
+
+        1. **fmask pass** — one bulk ``odc.stac.load`` per ``batch_days``
+           days fetches the cheap mask band for every missing day
+           (days x chunks dask tasks saturate ``threads``), writes it, and
+           screens each (day, chunk) cell on its own fmask statistics.
+        2. **reflectance pass** — days whose passing chunks share a window
+           are grouped and bulk-loaded the same way; screened cells are
+           never fetched.
+
+        Cells are marked done in the index per completed day, after its
+        pixels are on disk — an interrupted fill never records an unwritten
+        cell (and never re-downloads a written one).
         """
         window = grid.window_for_bbox(bbox)
         wanted = grid.chunks_in_window(window)
@@ -246,15 +286,85 @@ class Cube:
                 s._search_stac(ix, window, bbox6933, start, end)
 
             by_day = ix.scenes_for_range(start, end, s.sentinel2.max_cloud_cover)
-            downloaded = 0
+            todo = {}     # day -> (item_dicts, day_window, n_missing)
             for day, item_dicts in by_day.items():
                 missing = set(wanted) - ix.chunks_done(day, wanted)
-                if not missing:
-                    continue
-                day_window = grid.window_of_chunks(sorted(missing))
-                s._download_day(day, item_dicts, day_window, threads)
-                ix.mark_chunks(day, grid.chunks_in_window(day_window))
-                downloaded += len(missing)
+                if missing:
+                    todo[day] = (item_dicts, grid.window_of_chunks(sorted(missing)),
+                                 len(missing))
+            if not todo:
+                return 0
+
+            _configure_rio()
+            root = zarr.open_group(s.paths.store, mode='a')
+            fmask_band = s.sentinel2.cloud_mask_band
+            days_sorted = sorted(todo)
+
+            # A batch is held in RAM while it's split and written, so cap
+            # its day count by window area: ~1 GB for the uint8 fmask pass,
+            # ~1.5 GB for the int16 reflectance pass. Small AOIs stay at
+            # ``batch_days``; big AOIs shrink toward per-day loads.
+            n_px = (window[1] - window[0]) * (window[3] - window[2])
+            n_bands = len(s.sentinel2.bands) - 1
+            fmask_batch = max(1, min(batch_days, int(1e9 / max(n_px, 1))))
+            reflect_batch = max(1, min(batch_days, int(1.5e9 / max(n_bands * 2 * n_px, 1))))
+
+            # -- pass 1: fmask, bulk-loaded over batches of days ----------
+            # {day: window} for the reflectance pass; days that end fully
+            # screened (or yield no data) are complete after this pass.
+            reflect_work: dict[str, tuple] = {}
+            downloaded = 0
+            for i in range(0, len(days_sorted), fmask_batch):
+                batch = days_sorted[i:i + fmask_batch]
+                # One geobox per batch: the union of the batch's missing
+                # windows, so a batch is a single load on a single grid.
+                union = grid.window_of_chunks(
+                    [c for d in batch for c in grid.chunks_in_window(todo[d][1])])
+                fm_by_day = s._load_days(
+                    {d: todo[d][0] for d in batch}, [fmask_band], union, threads)
+                for day in batch:
+                    day_window = todo[day][1]
+                    fm = fm_by_day.get(day)
+                    if fm is not None:
+                        fm = _crop_to_window(fm, union, day_window)
+                    day_group = _day_group(root, day)
+                    s._write_band(day_group, fmask_band, fm[fmask_band] if fm is not None else None,
+                                  day_window, np.dtype('uint8'), 0)
+                    if fm is None:
+                        ix.mark_chunks(day, grid.chunks_in_window(day_window))
+                        downloaded += todo[day][2]
+                        continue
+                    passing = _chunks_passing_screen(
+                        fm[fmask_band].values, day_window, s.sentinel2)
+                    if passing:
+                        reflect_work[day] = grid.window_of_chunks(passing)
+                    else:
+                        ix.mark_chunks(day, grid.chunks_in_window(day_window))
+                        downloaded += todo[day][2]
+
+            # -- pass 2: reflectance, bulk-loaded per shared window -------
+            # Group days by their passing window so each group is one load
+            # on one geobox. For small AOIs every day shares the full
+            # window and this collapses to plain day-batching.
+            bands = [b for b in s.sentinel2.bands if b != fmask_band]
+            by_window: dict[tuple, list[str]] = {}
+            for day, win in reflect_work.items():
+                by_window.setdefault(win, []).append(day)
+            for win, days in by_window.items():
+                days.sort()
+                for i in range(0, len(days), reflect_batch):
+                    batch = days[i:i + reflect_batch]
+                    data_by_day = s._load_days(
+                        {d: todo[d][0] for d in batch}, bands, win, threads)
+                    for day in batch:
+                        data = data_by_day.get(day)
+                        day_group = _day_group(root, day)
+                        for band in bands:
+                            da = data[band] if data is not None else None
+                            s._write_band(day_group, band, da, win,
+                                          np.dtype('int16'), -999)
+                        ix.mark_chunks(day, grid.chunks_in_window(todo[day][1]))
+                        downloaded += todo[day][2]
             return downloaded
         finally:
             ix.close()
@@ -288,27 +398,46 @@ class Cube:
         ])
         ix.record_search(bbox6933, start, end)
 
-    def _load_day(s, items, bands, window, threads):
-        """One solar day's pixels for ``bands`` over ``window``, collapsed
-        to a single timestep (None if the day yields no data)."""
+    def _load_days(s, items_by_day: dict[str, list[dict]], bands, window,
+                   threads) -> dict[str, Dataset]:
+        """Pixels for ``bands`` over ``window`` for every day at once.
+
+        One ``odc.stac.load`` for the whole set of days: the dask graph has
+        (days x chunks x bands) tasks, so ``threads`` I/O workers stay busy
+        across day boundaries instead of paying each day's round-trip
+        latency serially. Returns ``{day: single-timestep Dataset}``; days
+        that yield no data are absent from the result.
+        """
+        import pystac
         import odc.stac
-        # In-process threaded scheduler — no distributed cluster (see the
-        # deadlock notes in diagnostics.md).
-        with dask.config.set(scheduler='threads', num_workers=threads):
-            ds: Dataset = odc.stac.load(
-                items,
-                bands=bands,
-                geobox=grid.geobox_for_window(window),
-                groupby=s.sentinel2.groupby,
-                chunks={'time': 1, 'x': grid.CHUNK, 'y': grid.CHUNK},
-                # One corrupt DEA tile costs a nodata gap, not the whole day.
-                fail_on_error=False,
-            ).compute()
-        if ds.time.size == 0:
-            return None
-        # Items were grouped by solar day before the call, so expect one
-        # timestep; collapse defensively if odc still yields several.
-        return ds.isel(time=0) if ds.time.size == 1 else ds.max(dim='time', keep_attrs=True)
+        items = [pystac.Item.from_dict(d)
+                 for dicts in items_by_day.values() for d in dicts]
+        if not items:
+            return {}
+        # Scheduler goes to compute() rather than dask.config: config
+        # mutation is process-global and callers may be concurrent.
+        ds: Dataset = odc.stac.load(
+            items,
+            bands=bands,
+            geobox=grid.geobox_for_window(window),
+            groupby=s.sentinel2.groupby,
+            chunks={'time': 1, 'x': grid.CHUNK, 'y': grid.CHUNK},
+            # One corrupt DEA tile costs a nodata gap, not the whole day.
+            fail_on_error=False,
+        ).compute(scheduler='threads', num_workers=threads)
+
+        out: dict[str, Dataset] = {}
+        for t in range(ds.time.size):
+            day = str(ds.time.values[t])[:10]
+            slice_ = ds.isel(time=t)
+            if day in out:
+                # groupby='solar_day' should yield one timestep per day;
+                # collapse defensively if odc still splits one.
+                out[day] = xr.concat([out[day], slice_], dim='__dup__').max(
+                    dim='__dup__', keep_attrs=True)
+            else:
+                out[day] = slice_
+        return out
 
     @staticmethod
     def _write_band(day_group, band, da, window, default_dtype, default_nodata):
@@ -331,51 +460,6 @@ class Cube:
             row0, row1, col0, col1 = window
             arr[row0:row1, col0:col1] = da.values
 
-    def _download_day(s, day: str, item_dicts: list[dict], window, threads: int) -> None:
-        """Fetch one solar day for ``window`` and write it into the day's
-        global-grid arrays, fmask first.
-
-        Two phases, both chunk-aligned:
-
-        1. Download the fmask band for the whole window and write it —
-           the cheap band (it compresses ~50x) is always stored.
-        2. Screen each chunk on its own fmask statistics
-           (:func:`_chunks_passing_screen`); reflectance bands are
-           downloaded only for the window of passing chunks. Screened
-           chunks keep their real fmask and read as nodata reflectance,
-           and ``clean_dataset`` drops such frames via the same fmask.
-
-        Because the screen is deterministic per chunk, every chunk in
-        ``window`` — passing or screened — is safely marked done by the
-        caller.
-        """
-        import pystac
-        _configure_rio()
-        items = [pystac.Item.from_dict(d) for d in item_dicts]
-
-        root = zarr.open_group(s.paths.store, mode='a')
-        try:
-            day_group = root[day]
-        except KeyError:
-            day_group = root.create_group(day)
-        day_group.attrs['crs'] = grid.CRS
-
-        fmask_band = s.sentinel2.cloud_mask_band
-        fm_slice = s._load_day(items, [fmask_band], window, threads)
-        fm = fm_slice[fmask_band] if fm_slice is not None else None
-        s._write_band(day_group, fmask_band, fm, window, np.dtype('uint8'), 0)
-        if fm is None:
-            return
-
-        passing = _chunks_passing_screen(fm.values, window, s.sentinel2)
-        if not passing:
-            return
-        sub = grid.window_of_chunks(passing)
-        bands = [b for b in s.sentinel2.bands if b != fmask_band]
-        data = s._load_day(items, bands, sub, threads)
-        for band in bands:
-            da = data[band] if data is not None else None
-            s._write_band(day_group, band, da, sub, np.dtype('int16'), -999)
 
     # -- read -------------------------------------------------------------
 
