@@ -659,7 +659,6 @@ class Cube:
             time = solar days (cloud-filtered per the ``Sentinel2`` config).
         """
         s.fill(bbox, start, end, threads=threads)
-        window = grid.window_for_bbox(bbox)
         ix = s._index()
         try:
             by_day = ix.scenes_for_range(start, end, s.sentinel2.max_cloud_cover)
@@ -668,7 +667,16 @@ class Cube:
 
         if bands is not None and (clean or indices):
             bands = tuple(dict.fromkeys((*bands, s.sentinel2.cloud_mask_band)))
-        ds = s._read_window(window, sorted(by_day), bands=bands)
+
+        # Read and deliver exactly the requested bbox. Storage, fill and
+        # dedup stay chunk-aligned (``window``), but the chunk-snapped
+        # window carries up to 3.6x the requested pixels as padding, and
+        # every downstream cost — this read's RAM, cleaning, SAM,
+        # unmixing, videos — pays for it (e.g. SAM 737 s padded vs
+        # ~210 s tight). Zarr slices across chunk boundaries natively.
+        ds = s._read_window(grid.tight_window_for_bbox(bbox),
+                            sorted(by_day), bands=bands)
+
         if clean or indices:
             ds = clean_dataset(ds, s.sentinel2, **clean_kwargs)
         if indices:

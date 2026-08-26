@@ -55,6 +55,24 @@ def window_for_bbox(bbox: list[float]) -> tuple[int, int, int, int]:
     return (row0, row1, col0, col1)
 
 
+def tight_window_for_bbox(bbox: list[float]) -> tuple[int, int, int, int]:
+    """Pixel window ``(row0, row1, col0, col1)`` covering ``bbox`` exactly —
+    snapped outward to whole pixels only, not to chunks.
+
+    :func:`window_for_bbox` (chunk-snapped) is the unit of storage and
+    dedup accounting; this is the unit of *delivery*. A chunk-snapped
+    window hands consumers up to (2*CHUNK-1)^2 extra pixels of padding —
+    3.6x the requested area for a ~2.5 km bbox — and every downstream
+    compute (cleaning, unmixing, segmentation) pays for it.
+    """
+    x0, y0, x1, y1 = bbox_to_6933(bbox)
+    col0 = int((x0 - X0) // RES)
+    col1 = -int(-(x1 - X0) // RES)
+    row0 = int((Y_TOP - y1) // RES)
+    row1 = -int(-(Y_TOP - y0) // RES)
+    return (row0, row1, col0, col1)
+
+
 def chunks_in_window(window: tuple[int, int, int, int]) -> list[tuple[int, int]]:
     """All chunk ids ``(cy, cx)`` inside a chunk-aligned pixel window."""
     row0, row1, col0, col1 = window
