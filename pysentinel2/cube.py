@@ -371,7 +371,7 @@ class Cube:
                 return 0
 
             _configure_rio()
-            root = zarr.open_group(s.paths.store, mode='a')
+            root = zarr.open_group(s.paths.store, mode='a', use_consolidated=False)
             fmask_band = s.sentinel2.cloud_mask_band
             days_sorted = sorted(todo)
 
@@ -484,7 +484,7 @@ class Cube:
         fmask_band = s.sentinel2.cloud_mask_band
         bands = [b for b in s.sentinel2.bands if b != fmask_band]
 
-        root = zarr.open_group(s.paths.store, mode='r')
+        root = zarr.open_group(s.paths.store, mode='r', use_consolidated=False)
         ix = s._index()
         repaired = 0
         try:
@@ -693,7 +693,7 @@ class Cube:
                      bands: tuple[str, ...] | None = None) -> Dataset:
         row0, row1, col0, col1 = window
         y, x = grid.coords_for_window(window)
-        root = zarr.open_group(s.paths.store, mode='r') if days else None
+        root = zarr.open_group(s.paths.store, mode='r', use_consolidated=False) if days else None
 
         band_names = tuple(bands) if bands is not None else s.sentinel2.bands
 
@@ -773,7 +773,7 @@ _TEST_BBOX = [148.36265, -33.52606, 148.38265, -33.50606]
 
 def _write_synthetic_day(cube: Cube, day: str, window, value: int) -> None:
     """Write a constant-valued synthetic day directly, bypassing the network."""
-    root = zarr.open_group(cube.paths.store, mode='a')
+    root = zarr.open_group(cube.paths.store, mode='a', use_consolidated=False)
     try:
         day_group = root[day]
     except KeyError:
