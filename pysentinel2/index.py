@@ -120,6 +120,18 @@ class Index:
                 [(solar_day, cy, cx, now) for cy, cx in chunks],
             )
 
+    def unmark_chunks(self, solar_day: str, chunks: list[tuple[int, int]]) -> None:
+        """Remove cells from the ledger so the next fill re-downloads them.
+
+        Used by :meth:`pysentinel2.cube.Cube.repair` when stored pixels
+        turn out to be download failures rather than real data gaps.
+        """
+        with self.db:
+            self.db.executemany(
+                'DELETE FROM chunks WHERE solar_day = ? AND cy = ? AND cx = ?',
+                [(solar_day, cy, cx) for cy, cx in chunks],
+            )
+
     def close(self) -> None:
         self.db.close()
 

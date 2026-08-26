@@ -193,6 +193,32 @@ def _chunks_passing_screen(fm: np.ndarray, window, sentinel2: Sentinel2,
     return passing
 
 
+_FAILED_NODATA_FRACTION = 0.5
+
+
+def _reflectance_looks_failed(data: Dataset, fmask_arr, window, bands,
+                              sentinel2: Sentinel2) -> bool:
+    """True when a day's freshly loaded reflectance is mostly nodata on
+    pixels its own fmask calls valid — the signature of failed HTTP reads
+    (``fail_on_error=False``) rather than a real acquisition gap. A single
+    corrupt tile stays below the threshold and is accepted as a small gap,
+    matching the long-standing behaviour."""
+    row0, row1, col0, col1 = window
+    fm = fmask_arr[row0:row1, col0:col1]
+    valid = fm != sentinel2.fmask_nodata
+    n_valid = int(valid.sum())
+    if n_valid == 0:
+        return False
+    for band in bands:
+        da = data[band]
+        nodata = da.attrs.get('nodata', -999)
+        vals = da.values
+        bad = ((vals == nodata) | np.isnan(vals)) & valid
+        if bad.sum() / n_valid > _FAILED_NODATA_FRACTION:
+            return True
+    return False
+
+
 def _day_group(root, day: str):
     """The zarr group for ``day``, created on first use."""
     try:
@@ -301,13 +327,17 @@ class Cube:
             days_sorted = sorted(todo)
 
             # A batch is held in RAM while it's split and written, so cap
-            # its day count by window area: ~1 GB for the uint8 fmask pass,
-            # ~1.5 GB for the int16 reflectance pass. Small AOIs stay at
+            # its day count by window area: ~128 MB for the uint8 fmask
+            # pass, ~256 MB for the int16 reflectance pass. Deliberately
+            # conservative — the lab's field machines have 8 GB RAM, and
+            # macOS answers memory pressure with SIGKILL; a smaller batch
+            # still carries plenty of dask tasks (days x chunks x bands)
+            # to keep the I/O threads saturated. Small AOIs stay at
             # ``batch_days``; big AOIs shrink toward per-day loads.
             n_px = (window[1] - window[0]) * (window[3] - window[2])
             n_bands = len(s.sentinel2.bands) - 1
-            fmask_batch = max(1, min(batch_days, int(1e9 / max(n_px, 1))))
-            reflect_batch = max(1, min(batch_days, int(1.5e9 / max(n_bands * 2 * n_px, 1))))
+            fmask_batch = max(1, min(batch_days, int(128e6 / max(n_px, 1))))
+            reflect_batch = max(1, min(batch_days, int(256e6 / max(n_bands * 2 * n_px, 1))))
 
             # -- pass 1: fmask, bulk-loaded over batches of days ----------
             # {day: window} for the reflectance pass; days that end fully
@@ -350,6 +380,7 @@ class Cube:
             by_window: dict[tuple, list[str]] = {}
             for day, win in reflect_work.items():
                 by_window.setdefault(win, []).append(day)
+            failed_days = []
             for win, days in by_window.items():
                 days.sort()
                 for i in range(0, len(days), reflect_batch):
@@ -359,13 +390,91 @@ class Cube:
                     for day in batch:
                         data = data_by_day.get(day)
                         day_group = _day_group(root, day)
+                        # Integrity gate: fail_on_error=False turns failed
+                        # HTTP reads into silent nodata. A band that is
+                        # mostly nodata where the day's own fmask has valid
+                        # ground is a failed download, not a data gap —
+                        # writing it and marking the day would poison the
+                        # store permanently (the cell is never re-fetched).
+                        # Leave such days unmarked so the next fill retries.
+                        if data is None or _reflectance_looks_failed(
+                                data, day_group[fmask_band], win, bands,
+                                s.sentinel2):
+                            failed_days.append(day)
+                            continue
                         for band in bands:
-                            da = data[band] if data is not None else None
-                            s._write_band(day_group, band, da, win,
+                            s._write_band(day_group, band, data[band], win,
                                           np.dtype('int16'), -999)
                         ix.mark_chunks(day, grid.chunks_in_window(todo[day][1]))
                         downloaded += todo[day][2]
+            if failed_days:
+                print(f'pysentinel2: {len(failed_days)} day(s) failed download '
+                      f'integrity and were left unmarked for retry: '
+                      f'{failed_days[:5]}{"..." if len(failed_days) > 5 else ""}')
             return downloaded
+        finally:
+            ix.close()
+
+    def repair(s, bbox: list[float], start: date, end: date) -> int:
+        """Unmark stored days whose reflectance is download-failure debris.
+
+        Scans every populated (day x chunk) cell covering ``bbox`` x
+        ``[start, end]`` and applies the same integrity test as the fill
+        gate: a band that is mostly nodata where the day's own fmask has
+        valid ground is a failed download, not a data gap. Matching days
+        are removed from the ledger so the next :meth:`fill` re-fetches
+        them. Returns the number of days unmarked.
+
+        Exists because fills before the integrity gate (or interrupted by
+        SIGKILL during a service outage) could mark such days as complete
+        — after which nothing would ever re-download them.
+        """
+        window = grid.window_for_bbox(bbox)
+        wanted = grid.chunks_in_window(window)
+        row0, row1, col0, col1 = window
+        fmask_band = s.sentinel2.cloud_mask_band
+        bands = [b for b in s.sentinel2.bands if b != fmask_band]
+
+        root = zarr.open_group(s.paths.store, mode='r')
+        ix = s._index()
+        repaired = 0
+        try:
+            for day in sorted(ix.scenes_for_range(start, end, s.sentinel2.max_cloud_cover)):
+                done = ix.chunks_done(day, wanted)
+                if not done:
+                    continue
+                try:
+                    day_group = root[day]
+                    fm = day_group[fmask_band][row0:row1, col0:col1]
+                except KeyError:
+                    continue
+                valid = fm != s.sentinel2.fmask_nodata
+                n_valid = int(valid.sum())
+                if n_valid == 0:
+                    continue
+                for band in bands:
+                    try:
+                        arr = day_group[band]
+                    except KeyError:
+                        # fmask-only day: screened out, legitimately no
+                        # reflectance — but only if the screen would still
+                        # reject it; a clear day with no reflectance array
+                        # at all is failure debris.
+                        if _chunks_passing_screen(fm, window, s.sentinel2):
+                            break
+                        continue
+                    nodata = arr.attrs.get('nodata', arr.fill_value)
+                    vals = arr[row0:row1, col0:col1]
+                    bad = ((vals == nodata) | np.isnan(vals.astype('float64'))) & valid
+                    if bad.sum() / n_valid > _FAILED_NODATA_FRACTION:
+                        break
+                else:
+                    continue
+                ix.unmark_chunks(day, sorted(done))
+                repaired += 1
+            if repaired:
+                print(f'pysentinel2: repair unmarked {repaired} day(s) for re-download')
+            return repaired
         finally:
             ix.close()
 
@@ -465,6 +574,7 @@ class Cube:
 
     def get_ds(s, bbox: list[float], start: date, end: date, clean: bool = False,
             indices: tuple[str, ...] = (), threads: int = 8,
+            bands: tuple[str, ...] | None = None,
             **clean_kwargs) -> Dataset:
         """Return the Sentinel-2 window for ``bbox`` x ``[start, end]``,
         downloading only what's missing first.
@@ -484,6 +594,13 @@ class Cube:
                 implies ``clean=True`` so formulas see cloud-masked
                 reflectance.
             threads: I/O concurrency for any downloads triggered.
+            bands: Optional subset of stored bands to read. ``None`` reads
+                everything. The fill always covers all bands; this trims
+                only the *read*, which matters for RAM — an 8-year window
+                of all 11 bands is several GB once cleaning promotes to
+                float, while e.g. the RGB bands are a fraction of that.
+                The fmask band is added automatically when ``clean`` or
+                ``indices`` need it.
             **clean_kwargs: Forwarded to :func:`clean_dataset` —
                 ``max_cloud_fraction``, ``min_valid_fraction``,
                 ``mask_snow``, ``mask_water``, ``buffer_px``.
@@ -500,7 +617,9 @@ class Cube:
         finally:
             ix.close()
 
-        ds = s._read_window(window, sorted(by_day))
+        if bands is not None and (clean or indices):
+            bands = tuple(dict.fromkeys((*bands, s.sentinel2.cloud_mask_band)))
+        ds = s._read_window(window, sorted(by_day), bands=bands)
         if clean or indices:
             ds = clean_dataset(ds, s.sentinel2, **clean_kwargs)
         if indices:
@@ -521,12 +640,14 @@ class Cube:
         return s.get_ds(query.bbox, query.start, query.end, clean=clean,
                      indices=indices, threads=threads, **clean_kwargs)
 
-    def _read_window(s, window, days: list[str]) -> Dataset:
+    def _read_window(s, window, days: list[str],
+                     bands: tuple[str, ...] | None = None) -> Dataset:
         row0, row1, col0, col1 = window
         y, x = grid.coords_for_window(window)
         root = zarr.open_group(s.paths.store, mode='r') if days else None
 
-        bands: dict[str, list[np.ndarray]] = {b: [] for b in s.sentinel2.bands}
+        band_names = tuple(bands) if bands is not None else s.sentinel2.bands
+        bands: dict[str, list[np.ndarray]] = {b: [] for b in band_names}
         nodata: dict[str, int] = {}
         kept_days = []
         for day in days:
@@ -535,7 +656,7 @@ class Cube:
             except KeyError:
                 continue  # a searched day with no scenes written
             kept_days.append(day)
-            for band in s.sentinel2.bands:
+            for band in band_names:
                 try:
                     arr = day_group[band]
                 except KeyError:
