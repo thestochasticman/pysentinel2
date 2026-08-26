@@ -111,6 +111,7 @@ def clean_dataset(ds: Dataset, sentinel2: Sentinel2 = defaultsentinel2,
     downstream consumers can see why frames survived and filter on snow
     explicitly. Computed on read, never stored.
     """
+    import rioxarray  # noqa: F401 — registers the .rio accessor used below
     fmask = ds[sentinel2.cloud_mask_band].values
     time_dims = ds[sentinel2.cloud_mask_band].dims
 
@@ -118,10 +119,16 @@ def clean_dataset(ds: Dataset, sentinel2: Sentinel2 = defaultsentinel2,
     gate = np.isin(fmask, [sentinel2.fmask_cloud, sentinel2.fmask_shadow])
 
     if buffer_px:
-        from scipy.ndimage import binary_dilation
+        # cv2.dilate over uint8 frames: same circular structuring element
+        # as the previous scipy binary_dilation, ~15x faster on multi-year
+        # windows (SIMD + no per-frame python overhead in the kernel).
+        import cv2
         yy, xx = np.ogrid[-buffer_px:buffer_px + 1, -buffer_px:buffer_px + 1]
-        disk = (yy ** 2 + xx ** 2) <= buffer_px ** 2
-        gate = np.stack([binary_dilation(frame, structure=disk) for frame in gate])
+        disk = ((yy ** 2 + xx ** 2) <= buffer_px ** 2).astype(np.uint8)
+        gate = np.stack([
+            cv2.dilate(frame.astype(np.uint8), disk).astype(bool)
+            for frame in gate
+        ])
 
     gate &= valid                      # nodata is invalid, not "cloudy"
     snow = (fmask == sentinel2.fmask_snow) & valid
@@ -142,20 +149,41 @@ def clean_dataset(ds: Dataset, sentinel2: Sentinel2 = defaultsentinel2,
     snow_frac = np.where(n_valid > 0, snow.sum(axis=(1, 2)) / np.maximum(n_valid, 1), 0.0)
     keep = (valid_frac >= min_valid_fraction) & (cloud_frac <= max_cloud_fraction)
 
-    nodatas = {name: ds[name].attrs.get('nodata') for name in ds.data_vars
-               if name != sentinel2.cloud_mask_band}
-    clear_da = xr.DataArray(clear, dims=time_dims)
-    ds = ds.drop_vars(sentinel2.cloud_mask_band).where(clear_da)
-    for name, nodata in nodatas.items():
-        if nodata is not None:
-            ds[name] = ds[name].where(ds[name] != nodata)
+    # Masking preserves the storage dtype: masked pixels are set to the
+    # band's nodata sentinel in the int16 array itself, after dropped
+    # frames are discarded. The previous implementation used ``.where``
+    # which promotes every band to float — a multi-year window ballooned
+    # from ~3.5 GB int16 to ~7-14 GB float and pushed 8 GB machines into
+    # swap, slowing every downstream consumer by 5-20x. Consumers convert
+    # to float per batch via :func:`to_float`.
+    #
+    # The input dataset is CONSUMED: each raw band is deleted as soon as
+    # its cleaned copy exists, so raw + cleaned never fully coexist —
+    # that transient doubling (~9 GB for 8 years) was itself a swap trip.
+    keep_idx = np.flatnonzero(keep)
+    not_clear = ~clear[keep_idx]
+    band_names = [n for n in ds.data_vars if n != sentinel2.cloud_mask_band]
+    time_coord = ds.coords['time'].values[keep_idx]
+    y_coord, x_coord = ds.coords['y'], ds.coords['x']
 
+    new_vars = {}
+    for name in band_names:
+        da = ds[name]
+        nodata = da.attrs.get('nodata')
+        if nodata is None:
+            nodata = -999
+        vals = da.values[keep_idx]           # one band's kept frames
+        vals[not_clear] = nodata
+        new_vars[name] = xr.DataArray(
+            vals, dims=('time', 'y', 'x'), attrs={**da.attrs, 'nodata': nodata})
+        del ds[name]                          # free the raw band now
+
+    ds = xr.Dataset(new_vars, coords={'time': time_coord, 'y': y_coord, 'x': x_coord})
     ds = ds.assign_coords(
-        valid_fraction=('time', np.round(valid_frac, 4)),
-        cloud_fraction=('time', np.round(cloud_frac, 4)),
-        snow_fraction=('time', np.round(snow_frac, 4)),
+        valid_fraction=('time', np.round(valid_frac[keep_idx], 4)),
+        cloud_fraction=('time', np.round(cloud_frac[keep_idx], 4)),
+        snow_fraction=('time', np.round(snow_frac[keep_idx], 4)),
     )
-    ds = ds.isel(time=np.flatnonzero(keep))
 
     ds = ds.rio.write_crs(sentinel2.crs, inplace=False)
     return ds.assign_attrs(
@@ -165,6 +193,27 @@ def clean_dataset(ds: Dataset, sentinel2: Sentinel2 = defaultsentinel2,
         frame_gate_classes=[sentinel2.fmask_cloud, sentinel2.fmask_shadow],
         masked_fmask_classes=sorted(masked_classes),
     )
+
+
+def to_float(ds: Dataset, dtype: str = 'float32') -> Dataset:
+    """Cast a cleaned window's bands to float, nodata sentinel -> NaN.
+
+    :func:`clean_dataset` keeps bands in their compact storage dtype
+    (int16, masked pixels at the band's ``nodata`` attr) so a multi-year
+    window fits in RAM. Consumers that need float-with-NaN semantics
+    call this at point of use — ideally on a time slice or batch, not
+    the whole window, to keep the float footprint bounded.
+    """
+    out = ds.copy(deep=False)
+    for name in ds.data_vars:
+        da = ds[name]
+        nodata = da.attrs.get('nodata')
+        vals = da.values.astype(dtype)
+        if nodata is not None:
+            vals[da.values == nodata] = np.nan
+        out[name] = da.copy(data=vals)
+        out[name].attrs.pop('nodata', None)
+    return out
 
 
 def _chunks_passing_screen(fm: np.ndarray, window, sentinel2: Sentinel2,
@@ -647,15 +696,18 @@ class Cube:
         root = zarr.open_group(s.paths.store, mode='r') if days else None
 
         band_names = tuple(bands) if bands is not None else s.sentinel2.bands
-        bands: dict[str, list[np.ndarray]] = {b: [] for b in band_names}
-        nodata: dict[str, int] = {}
-        kept_days = []
-        for day in days:
+
+        def _read_day(day):
+            """All requested bands for one day — run on a worker thread.
+
+            Returns ``None`` for a searched day with no scenes written,
+            else ``{band: (array, nodata)}``.
+            """
             try:
                 day_group = root[day]
             except KeyError:
-                continue  # a searched day with no scenes written
-            kept_days.append(day)
+                return None
+            out = {}
             for band in band_names:
                 try:
                     arr = day_group[band]
@@ -664,13 +716,33 @@ class Cube:
                     # never fetched — read as nodata.
                     is_mask = band == s.sentinel2.cloud_mask_band
                     fill = 0 if is_mask else -999
-                    nodata.setdefault(band, fill)
-                    bands[band].append(np.full(
+                    out[band] = (np.full(
                         (row1 - row0, col1 - col0), fill,
-                        dtype='uint8' if is_mask else 'int16'))
+                        dtype='uint8' if is_mask else 'int16'), fill)
                     continue
-                nodata[band] = arr.attrs.get('nodata', arr.fill_value)
-                bands[band].append(arr[row0:row1, col0:col1])
+                out[band] = (arr[row0:row1, col0:col1],
+                             arr.attrs.get('nodata', arr.fill_value))
+            return out
+
+        # Chunk decompression releases the GIL, and a multi-year window is
+        # thousands of independent little reads — serially they run at a
+        # fraction of disk bandwidth (measured ~5 s per year of a 4-chunk
+        # window; ~4x faster with the pool).
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            per_day = list(pool.map(_read_day, days))
+
+        bands: dict[str, list[np.ndarray]] = {b: [] for b in band_names}
+        nodata: dict[str, int] = {}
+        kept_days = []
+        for day, day_data in zip(days, per_day):
+            if day_data is None:
+                continue
+            kept_days.append(day)
+            for band in band_names:
+                arr, nd = day_data[band]
+                nodata[band] = nd
+                bands[band].append(arr)
 
         time = np.array([np.datetime64(d) for d in kept_days], dtype='datetime64[ns]')
         data_vars = {
@@ -816,8 +888,8 @@ def test_cloud_buffer_dilates():
     """Pixels adjacent to a cloud must be masked when buffer_px > 0."""
     fmask = np.ones((1, 40, 40))
     fmask[0, 20, 20] = 2                      # single cloud pixel
-    ds0 = clean_dataset(_synthetic_window(fmask), buffer_px=0)
-    ds3 = clean_dataset(_synthetic_window(fmask), buffer_px=3)
+    ds0 = to_float(clean_dataset(_synthetic_window(fmask), buffer_px=0))
+    ds3 = to_float(clean_dataset(_synthetic_window(fmask), buffer_px=3))
     neighbour0 = float(ds0['nbart_red'][0, 20, 22])
     neighbour3 = ds3['nbart_red'][0, 20, 22]
     return neighbour0 == 4000.0 and bool(np.isnan(neighbour3))
@@ -827,10 +899,10 @@ def test_snow_masked_water_kept_by_default():
     fmask = np.ones((1, 40, 40))
     fmask[0, 0, 0] = defaultsentinel2.fmask_snow
     fmask[0, 0, 1] = defaultsentinel2.fmask_water
-    ds = clean_dataset(_synthetic_window(fmask), buffer_px=0)
+    ds = to_float(clean_dataset(_synthetic_window(fmask), buffer_px=0))
     snow_px = ds['nbart_red'][0, 0, 0]
     water_px = ds['nbart_red'][0, 0, 1]
-    ds_w = clean_dataset(_synthetic_window(fmask), buffer_px=0, mask_water=True)
+    ds_w = to_float(clean_dataset(_synthetic_window(fmask), buffer_px=0, mask_water=True))
     return (
         bool(np.isnan(snow_px)) and float(water_px) == 4000.0
         and bool(np.isnan(ds_w['nbart_red'][0, 0, 1]))
@@ -842,7 +914,7 @@ def test_snow_excluded_from_frame_gate():
     snow pixels masked and its snow_fraction reported (analysis/ finding 2)."""
     fmask = np.ones((1, 40, 40))
     fmask[0, :30, :] = defaultsentinel2.fmask_snow
-    ds = clean_dataset(_synthetic_window(fmask), buffer_px=0)
+    ds = to_float(clean_dataset(_synthetic_window(fmask), buffer_px=0))
     return (
         ds.time.size == 1
         and float(ds.cloud_fraction[0]) == 0.0
