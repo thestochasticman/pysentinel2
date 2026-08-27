@@ -53,9 +53,10 @@ lab's reproducibility layer plug in without translation code.
 
 `fill()` is the write path; `get_ds()` is `fill()` followed by a read.
 The unit of *accounting* is the (solar-day × chunk) cell; the unit of
-*network work* is a multi-day **batch**, so one dask graph carries
-enough (day × chunk × band) tasks to keep every I/O thread busy across
-day boundaries.
+*network work* is a multi-day **batch**: one bulk `odc.stac.load` of
+every band (fmask included) per up to 64 missing days, so one dask
+graph carries days × chunks × bands tasks and the I/O threads stay
+saturated across day boundaries.
 
 ```mermaid
 flowchart TD
@@ -66,39 +67,28 @@ flowchart TD
     C -- "yes" --> F["index.scenes_for_range:<br/>solar days ≤ max_cloud_cover"]
     E --> F
     F --> G["plan: wanted − chunks_done<br/>per day → list of missing cells"]
-    G --> H1["<b>pass 1 — fmask, bulk</b><br/>one odc.stac.load per ≤64-day batch;<br/>write each day's fmask"]
-    H1 --> H2["screen each (day, chunk) on its own fmask:<br/>cloud+shadow ≤ screen_cloud_fraction?"]
-    H2 -- "day fully screened /<br/>no data" --> J
-    H2 -- "passing chunks" --> H3["<b>pass 2 — reflectance, bulk</b><br/>group days by passing window;<br/>one odc.stac.load per ≤64-day group"]
-    H3 --> I["write whole chunks into each<br/>day's global Zarr arrays"]
-    I --> J["index.mark_chunks per day, transactional,<br/><i>after</i> that day's pixels are on disk"]
-    J --> L["return number of cells downloaded<br/>(0 = fully served from cache)"]
+    G --> H["<b>bulk load</b> — all 11 bands,<br/>one odc.stac.load per ≤64-day batch"]
+    H --> I{"integrity gate per day:<br/>reflectance mostly nodata where<br/>fmask has valid ground?"}
+    I -- "fails (bad HTTP reads)" --> J["skip: day left unwritten and<br/>unmarked — next fill retries"]
+    I -- "passes" --> K["write whole chunks into the<br/>day's global Zarr arrays"]
+    K --> L["index.mark_chunks per day, transactional,<br/><i>after</i> the pixels are on disk"]
+    L --> M["return number of cells downloaded<br/>(0 = fully served from cache)"]
+    J --> M
 ```
 
-Batch sizes are capped by window area (~1 GB in flight for the uint8
-fmask pass, ~1.5 GB for the int16 reflectance pass), so small AOIs get
-maximal batching while large AOIs degrade gracefully toward per-day
-loads. Batching replaced a strictly per-day loop whose loads had too
-few tasks to occupy the thread pool: multi-year fills paid ~1–2 s of
-serial round-trip latency per solar day — and far worse whenever the
-DEA endpoint degraded, since every slow request blocked the queue
-instead of overlapping hundreds of others.
+Batch sizes are capped by window area (~256 MB of int16 in flight) so
+small AOIs get maximal batching while large AOIs degrade gracefully
+toward per-day loads.
 
-The download is **fmask-first**: the cheap classification band (it
-compresses ~50×) is fetched and stored for every candidate day, and the
-ten reflectance bands are fetched only for chunks whose own fmask shows
-a cloud+shadow share of valid pixels at most
-`Sentinel2.screen_cloud_fraction` (default 0.9). Fully overcast and
-off-swath chunks therefore cost one band, not eleven. The screen is a
-pure function of each chunk's fmask, so the decision is deterministic
-and every chunk — screened or not — is marked done. Screened cells keep
-their real fmask and read as nodata reflectance; `clean_dataset` drops
-such frames from the same fmask. This replaces reliance on the STAC
-granule-level `eo:cloud_cover` property, which the
-[difficult-region survey](../analysis/README.md) found to exclude 18 %
-of usable frames at the previous default of 30 (the property describes
-a ~100 × 100 km granule, not the requested window); the scene filter
-remains only as a loose prefilter (`max_cloud_cover = 80`).
+An earlier design fetched the fmask band first and *screened* chunks —
+downloading reflectance only where a chunk's own fmask showed enough
+clear ground. Measured on a real store the screen skipped reflectance
+on 8.8% of days while paying an extra round of COG opens on 100% of
+them; in a phase dominated by request latency rather than bytes, that
+is a net loss, so the screen was removed. Cloud handling now lives in
+the STAC-level `eo:cloud_cover ≤ 80` prefilter and in read-time
+[cleaning](cleaning.md); the fmask band is stored for every day either
+way, so nothing downstream changed.
 
 Two properties underpin the correctness of the scheme:
 

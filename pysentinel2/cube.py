@@ -245,15 +245,15 @@ def _chunks_passing_screen(fm: np.ndarray, window, sentinel2: Sentinel2,
 _FAILED_NODATA_FRACTION = 0.5
 
 
-def _reflectance_looks_failed(data: Dataset, fmask_arr, window, bands,
+def _reflectance_looks_failed(data: Dataset, bands,
                               sentinel2: Sentinel2) -> bool:
     """True when a day's freshly loaded reflectance is mostly nodata on
     pixels its own fmask calls valid — the signature of failed HTTP reads
     (``fail_on_error=False``) rather than a real acquisition gap. A single
     corrupt tile stays below the threshold and is accepted as a small gap,
-    matching the long-standing behaviour."""
-    row0, row1, col0, col1 = window
-    fm = fmask_arr[row0:row1, col0:col1]
+    matching the long-standing behaviour. ``data`` is the day's
+    window-local dataset including the fmask band."""
+    fm = data[sentinel2.cloud_mask_band].values
     valid = fm != sentinel2.fmask_nodata
     n_valid = int(valid.sum())
     if n_valid == 0:
@@ -321,7 +321,7 @@ class Cube:
 
     # -- fill -------------------------------------------------------------
 
-    def fill(s, bbox: list[float], start: date, end: date, threads: int = 8,
+    def fill(s, bbox: list[float], start: date, end: date, threads: int = 16,
              batch_days: int = 64) -> int:
         """Ensure every (day x chunk) cell covering ``bbox`` x ``[start, end]``
         is populated.
@@ -333,19 +333,14 @@ class Cube:
         touched (beyond a STAC search if this exact region/range was never
         searched before).
 
-        The unit of network work is a multi-day *batch*, not a day. A
-        single day's load has too few dask tasks (bands x chunks of a
-        typically small window) to keep the I/O threads busy, so per-day
-        loads left the connection idle between round-trips and multi-year
-        fills paid ~1-2 s of latency per solar day. Instead:
-
-        1. **fmask pass** — one bulk ``odc.stac.load`` per ``batch_days``
-           days fetches the cheap mask band for every missing day
-           (days x chunks dask tasks saturate ``threads``), writes it, and
-           screens each (day, chunk) cell on its own fmask statistics.
-        2. **reflectance pass** — days whose passing chunks share a window
-           are grouped and bulk-loaded the same way; screened cells are
-           never fetched.
+        The unit of network work is a multi-day *batch*, not a day: one
+        bulk ``odc.stac.load`` of every band (fmask included) per up to
+        ``batch_days`` days, so the dask graph carries days x chunks x
+        bands tasks and ``threads`` I/O workers stay saturated across day
+        boundaries. (An earlier design fetched fmask first and screened
+        chunks before reflectance; measured on this store the screen
+        skipped 8.8% of days' reflectance while paying an extra COG-open
+        round on every day — a net loss in a latency-bound phase.)
 
         Cells are marked done in the index per completed day, after its
         pixels are on disk — an interrupted fill never records an unwritten
@@ -376,86 +371,66 @@ class Cube:
             days_sorted = sorted(todo)
 
             # A batch is held in RAM while it's split and written, so cap
-            # its day count by window area: ~128 MB for the uint8 fmask
-            # pass, ~256 MB for the int16 reflectance pass. Deliberately
-            # conservative — the lab's field machines have 8 GB RAM, and
-            # macOS answers memory pressure with SIGKILL; a smaller batch
-            # still carries plenty of dask tasks (days x chunks x bands)
-            # to keep the I/O threads saturated. Small AOIs stay at
-            # ``batch_days``; big AOIs shrink toward per-day loads.
+            # its day count by window area: ~256 MB of int16 in flight.
+            # Deliberately conservative — the lab's field machines have
+            # 8 GB RAM, and macOS answers memory pressure with SIGKILL; a
+            # smaller batch still carries plenty of dask tasks (days x
+            # chunks x bands) to keep the I/O threads saturated. Small
+            # AOIs stay at ``batch_days``; big AOIs shrink toward
+            # per-day loads.
             n_px = (window[1] - window[0]) * (window[3] - window[2])
-            n_bands = len(s.sentinel2.bands) - 1
-            fmask_batch = max(1, min(batch_days, int(128e6 / max(n_px, 1))))
-            reflect_batch = max(1, min(batch_days, int(256e6 / max(n_bands * 2 * n_px, 1))))
+            n_bands = len(s.sentinel2.bands)
+            day_batch = max(1, min(batch_days, int(256e6 / max(n_bands * 2 * n_px, 1))))
 
-            # -- pass 1: fmask, bulk-loaded over batches of days ----------
-            # {day: window} for the reflectance pass; days that end fully
-            # screened (or yield no data) are complete after this pass.
-            reflect_work: dict[str, tuple] = {}
+            # Single pass: every band (fmask included) for a batch of days
+            # in one bulk load. A previous design fetched fmask first and
+            # screened chunks before downloading reflectance; measured on
+            # this store, the screen skipped reflectance on 8.8% of days
+            # while paying an extra COG-open round on 100% of them — in a
+            # latency-bound phase that is a net loss. Screening is gone;
+            # the STAC-level cloud_cover prefilter and read-time cleaning
+            # carry the cloud handling.
             downloaded = 0
-            for i in range(0, len(days_sorted), fmask_batch):
-                batch = days_sorted[i:i + fmask_batch]
+            failed_days = []
+            all_bands = list(s.sentinel2.bands)
+            refl_bands = [b for b in all_bands if b != fmask_band]
+            for i in range(0, len(days_sorted), day_batch):
+                batch = days_sorted[i:i + day_batch]
                 # One geobox per batch: the union of the batch's missing
                 # windows, so a batch is a single load on a single grid.
                 union = grid.window_of_chunks(
                     [c for d in batch for c in grid.chunks_in_window(todo[d][1])])
-                fm_by_day = s._load_days(
-                    {d: todo[d][0] for d in batch}, [fmask_band], union, threads)
+                data_by_day = s._load_days(
+                    {d: todo[d][0] for d in batch}, all_bands, union, threads)
                 for day in batch:
                     day_window = todo[day][1]
-                    fm = fm_by_day.get(day)
-                    if fm is not None:
-                        fm = _crop_to_window(fm, union, day_window)
+                    data = data_by_day.get(day)
                     day_group = _day_group(root, day)
-                    s._write_band(day_group, fmask_band, fm[fmask_band] if fm is not None else None,
-                                  day_window, np.dtype('uint8'), 0)
-                    if fm is None:
+                    if data is None:
+                        # A searched day whose items yielded no pixels:
+                        # store the empty fmask so reads see nodata, mark.
+                        s._write_band(day_group, fmask_band, None, day_window,
+                                      np.dtype('uint8'), 0)
                         ix.mark_chunks(day, grid.chunks_in_window(day_window))
                         downloaded += todo[day][2]
                         continue
-                    passing = _chunks_passing_screen(
-                        fm[fmask_band].values, day_window, s.sentinel2)
-                    if passing:
-                        reflect_work[day] = grid.window_of_chunks(passing)
-                    else:
-                        ix.mark_chunks(day, grid.chunks_in_window(day_window))
-                        downloaded += todo[day][2]
-
-            # -- pass 2: reflectance, bulk-loaded per shared window -------
-            # Group days by their passing window so each group is one load
-            # on one geobox. For small AOIs every day shares the full
-            # window and this collapses to plain day-batching.
-            bands = [b for b in s.sentinel2.bands if b != fmask_band]
-            by_window: dict[tuple, list[str]] = {}
-            for day, win in reflect_work.items():
-                by_window.setdefault(win, []).append(day)
-            failed_days = []
-            for win, days in by_window.items():
-                days.sort()
-                for i in range(0, len(days), reflect_batch):
-                    batch = days[i:i + reflect_batch]
-                    data_by_day = s._load_days(
-                        {d: todo[d][0] for d in batch}, bands, win, threads)
-                    for day in batch:
-                        data = data_by_day.get(day)
-                        day_group = _day_group(root, day)
-                        # Integrity gate: fail_on_error=False turns failed
-                        # HTTP reads into silent nodata. A band that is
-                        # mostly nodata where the day's own fmask has valid
-                        # ground is a failed download, not a data gap —
-                        # writing it and marking the day would poison the
-                        # store permanently (the cell is never re-fetched).
-                        # Leave such days unmarked so the next fill retries.
-                        if data is None or _reflectance_looks_failed(
-                                data, day_group[fmask_band], win, bands,
-                                s.sentinel2):
-                            failed_days.append(day)
-                            continue
-                        for band in bands:
-                            s._write_band(day_group, band, data[band], win,
-                                          np.dtype('int16'), -999)
-                        ix.mark_chunks(day, grid.chunks_in_window(todo[day][1]))
-                        downloaded += todo[day][2]
+                    data = _crop_to_window(data, union, day_window)
+                    # Integrity gate: fail_on_error=False turns failed HTTP
+                    # reads into silent nodata. A band that is mostly nodata
+                    # where the day's own fmask has valid ground is a failed
+                    # download, not a data gap — writing and marking it would
+                    # poison the store permanently. Leave the day unmarked
+                    # (and unwritten) so the next fill retries it.
+                    if _reflectance_looks_failed(data, refl_bands, s.sentinel2):
+                        failed_days.append(day)
+                        continue
+                    s._write_band(day_group, fmask_band, data[fmask_band],
+                                  day_window, np.dtype('uint8'), 0)
+                    for band in refl_bands:
+                        s._write_band(day_group, band, data[band], day_window,
+                                      np.dtype('int16'), -999)
+                    ix.mark_chunks(day, grid.chunks_in_window(day_window))
+                    downloaded += todo[day][2]
             if failed_days:
                 print(f'pysentinel2: {len(failed_days)} day(s) failed download '
                       f'integrity and were left unmarked for retry: '
@@ -622,7 +597,7 @@ class Cube:
     # -- read -------------------------------------------------------------
 
     def get_ds(s, bbox: list[float], start: date, end: date, clean: bool = False,
-            indices: tuple[str, ...] = (), threads: int = 8,
+            indices: tuple[str, ...] = (), threads: int = 16,
             bands: tuple[str, ...] | None = None,
             **clean_kwargs) -> Dataset:
         """Return the Sentinel-2 window for ``bbox`` x ``[start, end]``,
@@ -686,12 +661,12 @@ class Cube:
 
     # -- Query adapters (the reproducibility layer speaks Query) ----------
 
-    def fill_query(s, query, threads: int = 8) -> int:
+    def fill_query(s, query, threads: int = 16) -> int:
         """:meth:`fill` for a :class:`borevitz_lab.query.Query`."""
         return s.fill(query.bbox, query.start, query.end, threads=threads)
 
     def get_ds_query(s, query, clean: bool = False,
-                  indices: tuple[str, ...] = (), threads: int = 8,
+                  indices: tuple[str, ...] = (), threads: int = 16,
                   **clean_kwargs) -> Dataset:
         """:meth:`get_ds` for a :class:`borevitz_lab.query.Query`."""
         return s.get_ds(query.bbox, query.start, query.end, clean=clean,

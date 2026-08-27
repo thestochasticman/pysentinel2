@@ -28,13 +28,13 @@ class Sentinel2:
     # STAC search time — all scenes are recorded, so relaxing the threshold
     # later needs no re-search, just fills the newly-eligible days).
     # Granule-level eo:cloud_cover is a weak proxy for window-level
-    # cloudiness (analysis/: 30 excluded 18% of usable frames); the
-    # fmask-first screen below is the effective download gate, so this
-    # stays loose.
+    # cloudiness (analysis/: 30 excluded 18% of usable frames), so this
+    # stays loose; read-time cleaning is the real cloud gate.
     max_cloud_cover: float = 80.0
-    # Download screen: chunks whose fmask cloud+shadow share of valid
-    # pixels exceeds this get no reflectance download (fmask is always
-    # stored). 1.0 disables screening.
+    # Legacy of the removed fmask-first download screen (it skipped 8.8%
+    # of days' reflectance for an extra request round on every day).
+    # Still used by Cube.repair to recognise fmask-only days written by
+    # old fills as legitimately screened rather than failure debris.
     screen_cloud_fraction: float = 0.9
     fmask_nodata: int = 0
     fmask_cloud: int = 2

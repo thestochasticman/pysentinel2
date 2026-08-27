@@ -129,14 +129,15 @@ Absolute times vary with network and DEA load. The zero rows are the
 significant ones: those requests are resolved by index lookups alone,
 with no network access.
 
-Multi-year fills are batched, not per-day: fmask for up to 64 missing
-days is fetched in one bulk load, chunks are screened, and reflectance
-follows in bulk for the passing cells (see
-[the fill algorithm](docs/architecture.md#the-fill-algorithm)). This
-keeps the I/O threads saturated across day boundaries — a two-month
-cold fill measured 20-26 s where the previous per-day loop measured
-33 s on a healthy DEA and 270 s on a degraded one, and the gap widens
-with the length of the range.
+Multi-year fills are batched, not per-day: all 11 bands for up to 64
+missing days come down in one bulk load per batch (see
+[the fill algorithm](docs/architecture.md#the-fill-algorithm)), keeping
+the I/O threads saturated across day boundaries — a two-month cold fill
+measured 20-26 s where a per-day loop measured 33 s on a healthy DEA
+and 270 s on a degraded one, and the gap widens with the length of the
+range. An earlier fmask-first screening pass was removed after
+measurement: it skipped 8.8% of days' reflectance while paying an extra
+request round on every day.
 
 ## Install
 
