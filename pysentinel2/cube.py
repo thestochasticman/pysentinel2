@@ -268,12 +268,18 @@ def _reflectance_looks_failed(data: Dataset, bands,
     return False
 
 
-def _day_group(root, day: str):
-    """The zarr group for ``day``, created on first use."""
-    try:
-        group = root[day]
-    except KeyError:
-        group = root.create_group(day)
+def _day_group(store, day: str):
+    """The zarr group for ``day``, created on first use.
+
+    Opened by path with ``use_consolidated=False``: child-group lookups
+    through a parent Group object honour any ``consolidated_metadata``
+    embedded in that group's own metadata document, and a stale snapshot
+    (e.g. from a one-off ``zarr.consolidate_metadata`` call) then hides
+    arrays that exist on disk — lookups KeyError, the create fallback
+    hits ContainsArrayError, and fills crash. Path-based opens with the
+    flag off are immune regardless of what metadata a store carries.
+    """
+    group = zarr.open_group(store, path=day, mode='a', use_consolidated=False)
     group.attrs['crs'] = grid.CRS
     return group
 
@@ -405,7 +411,7 @@ class Cube:
                 for day in batch:
                     day_window = todo[day][1]
                     data = data_by_day.get(day)
-                    day_group = _day_group(root, day)
+                    day_group = _day_group(s.paths.store, day)
                     if data is None:
                         # A searched day whose items yielded no pixels:
                         # store the empty fmask so reads see nodata, mark.
@@ -468,9 +474,10 @@ class Cube:
                 if not done:
                     continue
                 try:
-                    day_group = root[day]
+                    day_group = zarr.open_group(s.paths.store, path=day,
+                                                mode='r', use_consolidated=False)
                     fm = day_group[fmask_band][row0:row1, col0:col1]
-                except KeyError:
+                except (KeyError, FileNotFoundError, zarr.errors.GroupNotFoundError):
                     continue
                 valid = fm != s.sentinel2.fmask_nodata
                 n_valid = int(valid.sum())
@@ -687,8 +694,9 @@ class Cube:
             else ``{band: (array, nodata)}``.
             """
             try:
-                day_group = root[day]
-            except KeyError:
+                day_group = zarr.open_group(s.paths.store, path=day,
+                                            mode='r', use_consolidated=False)
+            except (FileNotFoundError, zarr.errors.GroupNotFoundError):
                 return None
             out = {}
             for band in band_names:
