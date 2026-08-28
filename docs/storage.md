@@ -78,7 +78,13 @@ offline; the STAC API is only contacted for regions/ranges never seen
 before. Because *all* scenes are recorded regardless of cloud cover,
 changing `max_cloud_cover` later is a pure read-side change.
 
-**`chunks`** is the deduplication ledger: a row `(solar_day, cy, cx)`
+**`coverage`** is the deduplication ledger, at pixel exactness: a row
+`(solar_day, row0, row1, col0, col1)` records one written window. A day's
+missing work is its requested window minus the union of its rects
+(`grid.rect_subtract`); fills append one rect per day they complete.
+Legacy stores that used the fixed-chunk `chunks` table migrate
+automatically on first open (each chunk becomes a rect; x-adjacent runs
+coalesce). The old semantics for reference: a row `(solar_day, cy, cx)`
 asserts that this cell of the global grid is completely written for
 that day. `fill()` computes `wanted − done` per day and downloads only
 the difference.

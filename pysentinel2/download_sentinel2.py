@@ -82,8 +82,9 @@ def test_repeat_query_downloads_nothing():
 
 
 def test_overlapping_query_downloads_only_new_cells():
-    """A bbox shifted ~1 km east reuses the shared chunks — the number of
-    newly downloaded cells is strictly less than its total cell count."""
+    """A bbox shifted ~1 km east reuses covered pixels — the downloaded
+    (day x pixel) count is strictly less than the shifted window's total,
+    matching the uncovered strip exactly."""
     from pysentinel2.cube import Cube
     from pysentinel2 import grid
     cfg = _shared_test_cfg()
@@ -96,9 +97,10 @@ def test_overlapping_query_downloads_only_new_cells():
                stub='s2_overlap_b', config=cfg)
     cube = Cube(config=cfg)
     n_days = len(cube._index().scenes_for_range(q2.start, q2.end, cube.sentinel2.max_cloud_cover))
-    total_cells = len(grid.chunks_in_window(grid.window_for_bbox(q2.bbox))) * max(n_days, 1)
+    w = grid.tight_window_for_bbox(q2.bbox)
+    total_px = (w[1] - w[0]) * (w[3] - w[2]) * max(n_days, 1)
     downloaded = cube.fill_query(q2)
-    return 0 <= downloaded < total_cells
+    return 0 <= downloaded < total_px
 
 
 def test():

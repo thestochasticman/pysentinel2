@@ -52,7 +52,7 @@ lab's reproducibility layer plug in without translation code.
 ## The `fill` algorithm
 
 `fill()` is the write path; `get_ds()` is `fill()` followed by a read.
-The unit of *accounting* is the (solar-day × chunk) cell; the unit of
+Accounting is pixel-exact per solar day (coverage rectangles); the unit of
 *network work* is a multi-day **batch**: one bulk `odc.stac.load` of
 every band (fmask included) per up to 64 missing days, so one dask
 graph carries days × chunks × bands tasks and the I/O threads stay
@@ -66,7 +66,7 @@ flowchart TD
     D --> E["upsert full item JSON per scene;<br/>record the search extent"]
     C -- "yes" --> F["index.scenes_for_range:<br/>solar days ≤ max_cloud_cover"]
     E --> F
-    F --> G["plan: wanted − chunks_done<br/>per day → list of missing cells"]
+    F --> G["plan: tight window − coverage rects<br/>per day → missing pixel rects"]
     G --> H["<b>bulk load</b> — all 11 bands,<br/>one odc.stac.load per ≤64-day batch"]
     H --> I{"integrity gate per day:<br/>reflectance mostly nodata where<br/>fmask has valid ground?"}
     I -- "fails (bad HTTP reads)" --> J["skip: day left unwritten and<br/>unmarked — next fill retries"]

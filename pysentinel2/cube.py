@@ -216,30 +216,23 @@ def to_float(ds: Dataset, dtype: str = 'float32') -> Dataset:
     return out
 
 
-def _chunks_passing_screen(fm: np.ndarray, window, sentinel2: Sentinel2,
-                           threshold: float | None = None) -> list[tuple[int, int]]:
-    """Chunk ids in ``window`` whose fmask justifies a reflectance download.
+def _window_wants_reflectance(fm: np.ndarray, sentinel2: Sentinel2,
+                              threshold: float | None = None) -> bool:
+    """Would the removed download screen have fetched reflectance here?
 
-    A chunk passes when it has valid pixels and its cloud+shadow share
-    of them is at most ``sentinel2.screen_cloud_fraction``. The decision
-    is a pure function of the chunk's own fmask, so it is deterministic:
-    a screened-out cell would be screened out identically by any later
-    query, and the index can mark it done.
+    True when the window has valid pixels and their cloud+shadow share
+    is at most ``sentinel2.screen_cloud_fraction``. Used only by
+    :meth:`Cube.repair` to recognise fmask-only days written by old
+    screening-era fills as legitimately reflectance-free rather than
+    download-failure debris.
     """
     thr = sentinel2.screen_cloud_fraction if threshold is None else threshold
-    row0, _, col0, _ = window
-    passing = []
-    for cy, cx in grid.chunks_in_window(window):
-        r, c = cy * grid.CHUNK - row0, cx * grid.CHUNK - col0
-        sub = fm[r:r + grid.CHUNK, c:c + grid.CHUNK]
-        valid = sub != sentinel2.fmask_nodata
-        n_valid = int(valid.sum())
-        if n_valid == 0:
-            continue
-        bad = np.isin(sub, [sentinel2.fmask_cloud, sentinel2.fmask_shadow]) & valid
-        if bad.sum() / n_valid <= thr:
-            passing.append((cy, cx))
-    return passing
+    valid = fm != sentinel2.fmask_nodata
+    n_valid = int(valid.sum())
+    if n_valid == 0:
+        return False
+    bad = np.isin(fm, [sentinel2.fmask_cloud, sentinel2.fmask_shadow]) & valid
+    return bad.sum() / n_valid <= thr
 
 
 _FAILED_NODATA_FRACTION = 0.5
@@ -329,15 +322,18 @@ class Cube:
 
     def fill(s, bbox: list[float], start: date, end: date, threads: int = 16,
              batch_days: int = 64) -> int:
-        """Ensure every (day x chunk) cell covering ``bbox`` x ``[start, end]``
-        is populated.
+        """Ensure every pixel of ``bbox``'s tight window is populated for
+        every candidate solar day in ``[start, end]``.
 
         Query-agnostic: takes the region and range directly, no
         :class:`borevitz_lab.query.Query` (and none of its registry/dir side
-        effects) required. Returns the number of cells actually downloaded —
-        0 means the request was already fully covered and no network was
-        touched (beyond a STAC search if this exact region/range was never
-        searched before).
+        effects) required. Coverage accounting is pixel-exact: each day's
+        missing region is the tight window minus its recorded coverage
+        rects, so small farms pay no chunk padding (the previous 256 px
+        chunk accounting padded a 2.5 km bbox by 3.6x). Returns the number
+        of (day x pixel) cells downloaded — 0 means fully covered, no
+        network touched (beyond a STAC search if this exact region/range
+        was never searched before).
 
         The unit of network work is a multi-day *batch*, not a day: one
         bulk ``odc.stac.load`` of every band (fmask included) per up to
@@ -348,12 +344,11 @@ class Cube:
         skipped 8.8% of days' reflectance while paying an extra COG-open
         round on every day — a net loss in a latency-bound phase.)
 
-        Cells are marked done in the index per completed day, after its
-        pixels are on disk — an interrupted fill never records an unwritten
-        cell (and never re-downloads a written one).
+        Coverage is marked per completed day, strictly after its pixels
+        are on disk — an interrupted fill never records an unwritten
+        region (and never re-downloads a written one).
         """
-        window = grid.window_for_bbox(bbox)
-        wanted = grid.chunks_in_window(window)
+        window = grid.tight_window_for_bbox(bbox)
         bbox6933 = (grid.X0 + window[2] * grid.RES, grid.Y_TOP - window[1] * grid.RES,
                     grid.X0 + window[3] * grid.RES, grid.Y_TOP - window[0] * grid.RES)
         ix = s._index()
@@ -362,12 +357,16 @@ class Cube:
                 s._search_stac(ix, window, bbox6933, start, end)
 
             by_day = ix.scenes_for_range(start, end, s.sentinel2.max_cloud_cover)
-            todo = {}     # day -> (item_dicts, day_window, n_missing)
+            todo = {}     # day -> (item_dicts, day_window, n_missing_px)
             for day, item_dicts in by_day.items():
-                missing = set(wanted) - ix.chunks_done(day, wanted)
+                missing = grid.rect_subtract(window, ix.covered_rects(day))
                 if missing:
-                    todo[day] = (item_dicts, grid.window_of_chunks(sorted(missing)),
-                                 len(missing))
+                    # One load region per day: the bbox of the missing
+                    # rects. It may re-cover slivers already on disk (an
+                    # L-shaped gap) — harmless, identical pixels rewrite.
+                    todo[day] = (item_dicts, grid.rects_bbox(missing),
+                                 sum((r1 - r0) * (c1 - c0)
+                                     for r0, r1, c0, c1 in missing))
             if not todo:
                 return 0
 
@@ -404,8 +403,7 @@ class Cube:
                 batch = days_sorted[i:i + day_batch]
                 # One geobox per batch: the union of the batch's missing
                 # windows, so a batch is a single load on a single grid.
-                union = grid.window_of_chunks(
-                    [c for d in batch for c in grid.chunks_in_window(todo[d][1])])
+                union = grid.rects_bbox([todo[d][1] for d in batch])
                 data_by_day = s._load_days(
                     {d: todo[d][0] for d in batch}, all_bands, union, threads)
                 for day in batch:
@@ -417,7 +415,7 @@ class Cube:
                         # store the empty fmask so reads see nodata, mark.
                         s._write_band(day_group, fmask_band, None, day_window,
                                       np.dtype('uint8'), 0)
-                        ix.mark_chunks(day, grid.chunks_in_window(day_window))
+                        ix.mark_rect(day, day_window)
                         downloaded += todo[day][2]
                         continue
                     data = _crop_to_window(data, union, day_window)
@@ -435,7 +433,7 @@ class Cube:
                     for band in refl_bands:
                         s._write_band(day_group, band, data[band], day_window,
                                       np.dtype('int16'), -999)
-                    ix.mark_chunks(day, grid.chunks_in_window(day_window))
+                    ix.mark_rect(day, day_window)
                     downloaded += todo[day][2]
             if failed_days:
                 print(f'pysentinel2: {len(failed_days)} day(s) failed download '
@@ -448,7 +446,7 @@ class Cube:
     def repair(s, bbox: list[float], start: date, end: date) -> int:
         """Unmark stored days whose reflectance is download-failure debris.
 
-        Scans every populated (day x chunk) cell covering ``bbox`` x
+        Scans every day with recorded coverage intersecting ``bbox`` over
         ``[start, end]`` and applies the same integrity test as the fill
         gate: a band that is mostly nodata where the day's own fmask has
         valid ground is a failed download, not a data gap. Matching days
@@ -459,8 +457,7 @@ class Cube:
         SIGKILL during a service outage) could mark such days as complete
         — after which nothing would ever re-download them.
         """
-        window = grid.window_for_bbox(bbox)
-        wanted = grid.chunks_in_window(window)
+        window = grid.tight_window_for_bbox(bbox)
         row0, row1, col0, col1 = window
         fmask_band = s.sentinel2.cloud_mask_band
         bands = [b for b in s.sentinel2.bands if b != fmask_band]
@@ -470,8 +467,9 @@ class Cube:
         repaired = 0
         try:
             for day in sorted(ix.scenes_for_range(start, end, s.sentinel2.max_cloud_cover)):
-                done = ix.chunks_done(day, wanted)
-                if not done:
+                # only days whose coverage intersects the window
+                if not any(max(r0, row0) < min(r1, row1) and max(c0, col0) < min(c1, col1)
+                           for r0, r1, c0, c1 in ix.covered_rects(day)):
                     continue
                 try:
                     day_group = zarr.open_group(s.paths.store, path=day,
@@ -491,7 +489,7 @@ class Cube:
                         # reflectance — but only if the screen would still
                         # reject it; a clear day with no reflectance array
                         # at all is failure debris.
-                        if _chunks_passing_screen(fm, window, s.sentinel2):
+                        if _window_wants_reflectance(fm, s.sentinel2):
                             break
                         continue
                     nodata = arr.attrs.get('nodata', arr.fill_value)
@@ -501,7 +499,7 @@ class Cube:
                         break
                 else:
                     continue
-                ix.unmark_chunks(day, sorted(done))
+                ix.unmark_day(day)
                 repaired += 1
             if repaired:
                 print(f'pysentinel2: repair unmarked {repaired} day(s) for re-download')
@@ -790,11 +788,11 @@ _TEST_START, _TEST_END = date(2024, 1, 1), date(2024, 1, 31)
 
 def _prime_synthetic(cube: Cube, day: str, item_id: str, value: int):
     """Mark a fully-populated synthetic day in the index and store."""
-    window = grid.window_for_bbox(_TEST_BBOX)
+    window = grid.window_for_bbox(_TEST_BBOX)   # generous cover, superset of tight
     ix = cube._index()
     ix.upsert_scenes([(item_id, day, 1.0, {'id': item_id})])
     ix.record_search((-1e9, -1e9, 1e9, 1e9), _TEST_START, _TEST_END)
-    ix.mark_chunks(day, grid.chunks_in_window(window))
+    ix.mark_rect(day, window)
     ix.close()
     _write_synthetic_day(cube, day, window, value=value)
 
@@ -915,17 +913,17 @@ def test_snow_excluded_from_frame_gate():
     )
 
 
-def test_screen_passes_clear_rejects_cloudy_chunks():
-    """Per-chunk download screen: clear and off-swath chunks decided
-    correctly, threshold honoured."""
-    from pysentinel2.cube import _chunks_passing_screen
-    win = (0, grid.CHUNK, 0, 3 * grid.CHUNK)                 # 1 x 3 chunks
-    fm = np.ones((grid.CHUNK, 3 * grid.CHUNK), dtype='uint8')
-    fm[:, grid.CHUNK:2 * grid.CHUNK] = defaultsentinel2.fmask_cloud   # chunk 1 fully cloudy
-    fm[:, 2 * grid.CHUNK:] = defaultsentinel2.fmask_nodata            # chunk 2 off-swath
-    passing = _chunks_passing_screen(fm, win, defaultsentinel2)
-    all_pass = _chunks_passing_screen(fm, win, defaultsentinel2, threshold=1.0)
-    return passing == [(0, 0)] and all_pass == [(0, 0), (0, 1)]
+def test_screen_legacy_recognition():
+    """Repair's fmask-only-day recognition: clear window wants
+    reflectance, cloudy window does not, off-swath window does not."""
+    from pysentinel2.cube import _window_wants_reflectance
+    clear = np.ones((64, 64), dtype='uint8')
+    cloudy = np.full((64, 64), defaultsentinel2.fmask_cloud, dtype='uint8')
+    nodata = np.full((64, 64), defaultsentinel2.fmask_nodata, dtype='uint8')
+    return (_window_wants_reflectance(clear, defaultsentinel2)
+            and not _window_wants_reflectance(cloudy, defaultsentinel2)
+            and _window_wants_reflectance(cloudy, defaultsentinel2, threshold=1.0)
+            and not _window_wants_reflectance(nodata, defaultsentinel2))
 
 
 def test_query_adapters_match_agnostic_calls():
@@ -956,7 +954,7 @@ def test():
         test_cloud_buffer_dilates(),
         test_snow_masked_water_kept_by_default(),
         test_snow_excluded_from_frame_gate(),
-        test_screen_passes_clear_rejects_cloudy_chunks(),
+        test_screen_legacy_recognition(),
         test_query_adapters_match_agnostic_calls(),
     ])
 

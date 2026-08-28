@@ -1,7 +1,7 @@
 # pysentinel2
 
 A **local Sentinel-2 datacube that fills itself on demand**. Every pixel
-this machine ever downloads lands in one sparse, chunk-indexed store —
+this machine ever downloads lands in one sparse, pixel-indexed store —
 so nothing is ever downloaded twice: overlapping areas, extended date
 ranges and repeat runs all reuse the same chunks. Part of the
 [Borevitz Lab](https://borevitzlab.anu.edu.au/) ecosystem; the default
@@ -20,7 +20,7 @@ off-swath days are all stored raw and classified at read time.*
 
 ```
 {data_root}/sentinel2_cube/
-├── index.db      # SQLite: populated chunks · seen scenes · past searches
+├── index.db      # SQLite: coverage rects · seen scenes · past searches
 └── cube.zarr/
     ├── 2024-01-03/   # one group per solar day
     │   ├── nbart_red # arrays on a fixed EPSG:6933 10 m global grid
@@ -28,9 +28,11 @@ off-swath days are all stored raw and classified at read time.*
     └── 2024-01-08/ ...
 ```
 
-- Any bbox maps deterministically to a set of ~2.56 km grid chunks.
-  `Cube.get_ds(bbox, start, end)` diffs the requested (day × chunk) cells against the
-  index and downloads **only the missing cells**.
+- Any bbox maps deterministically to a pixel window on the fixed grid.
+  `Cube.get_ds(bbox, start, end)` subtracts each day's recorded coverage
+  rectangles from that window and downloads **only the missing pixels** —
+  coverage accounting is pixel-exact, so small farms pay no chunk padding
+  (256×256-px chunks remain the *storage* unit inside the Zarr arrays).
 - STAC results are cached (full item JSON) in the index, so re-reads and
   re-fills of known regions work without re-searching. Cloud-cover
   filtering happens at read time from the index — relaxing the threshold

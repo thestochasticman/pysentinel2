@@ -73,6 +73,46 @@ def tight_window_for_bbox(bbox: list[float]) -> tuple[int, int, int, int]:
     return (row0, row1, col0, col1)
 
 
+def rect_subtract(rect: tuple[int, int, int, int],
+                  covers: list[tuple[int, int, int, int]],
+                  ) -> list[tuple[int, int, int, int]]:
+    """Disjoint rectangles of ``rect`` not covered by any rect in ``covers``.
+
+    All rects are half-open pixel windows ``(row0, row1, col0, col1)``.
+    Each subtraction splits a remainder into at most four pieces (above,
+    below, left, right of the intersection). The basis of pixel-exact
+    coverage accounting: a fill's missing work for a day is
+    ``rect_subtract(tight_window, covered_rects(day))``.
+    """
+    remaining = [rect] if rect[0] < rect[1] and rect[2] < rect[3] else []
+    for cr0, cr1, cc0, cc1 in covers:
+        next_remaining = []
+        for r0, r1, c0, c1 in remaining:
+            ir0, ir1 = max(r0, cr0), min(r1, cr1)
+            ic0, ic1 = max(c0, cc0), min(c1, cc1)
+            if ir0 >= ir1 or ic0 >= ic1:          # no overlap
+                next_remaining.append((r0, r1, c0, c1))
+                continue
+            if r0 < ir0:                           # strip above
+                next_remaining.append((r0, ir0, c0, c1))
+            if ir1 < r1:                           # strip below
+                next_remaining.append((ir1, r1, c0, c1))
+            if c0 < ic0:                           # strip left of intersection
+                next_remaining.append((ir0, ir1, c0, ic0))
+            if ic1 < c1:                           # strip right
+                next_remaining.append((ir0, ir1, ic1, c1))
+        remaining = next_remaining
+    return remaining
+
+
+def rects_bbox(rects: list[tuple[int, int, int, int]]) -> tuple[int, int, int, int]:
+    """Smallest pixel window containing every rect in ``rects``."""
+    return (
+        min(r[0] for r in rects), max(r[1] for r in rects),
+        min(r[2] for r in rects), max(r[3] for r in rects),
+    )
+
+
 def chunks_in_window(window: tuple[int, int, int, int]) -> list[tuple[int, int]]:
     """All chunk ids ``(cy, cx)`` inside a chunk-aligned pixel window."""
     row0, row1, col0, col1 = window
@@ -160,6 +200,37 @@ def test_coords_match_window():
     return len(y) == w[1] - w[0] and len(x) == w[3] - w[2] and y[0] > y[-1] and x[0] < x[-1]
 
 
+def test_rect_subtract_against_mask():
+    """rect_subtract must agree exactly with brute-force boolean masking
+    across randomised cover sets: disjoint output, full missing coverage."""
+    import numpy as np
+    rng = np.random.default_rng(7)
+    for _ in range(50):
+        H = W = 40
+        rect = (0, H, 0, W)
+        covers = []
+        for _ in range(rng.integers(0, 6)):
+            r0, c0 = rng.integers(0, H - 1), rng.integers(0, W - 1)
+            covers.append((int(r0), int(rng.integers(r0 + 1, H + 5)),
+                           int(c0), int(rng.integers(c0 + 1, W + 5))))
+        missing = rect_subtract(rect, covers)
+        # reference mask
+        mask = np.ones((H, W), dtype=bool)
+        for r0, r1, c0, c1 in covers:
+            mask[max(r0, 0):r1, max(c0, 0):c1] = False
+        out = np.zeros((H, W), dtype=int)
+        for r0, r1, c0, c1 in missing:
+            out[r0:r1, c0:c1] += 1
+        if not ((out <= 1).all()                      # disjoint
+                and ((out == 1) == mask).all()):      # exactly the missing set
+            return False
+    return True
+
+
+def test_rects_bbox():
+    return rects_bbox([(2, 5, 1, 4), (0, 3, 3, 9)]) == (0, 5, 1, 9)
+
+
 def test():
     return all([
         test_window_is_chunk_aligned(),
@@ -167,6 +238,8 @@ def test():
         test_overlapping_bboxes_share_chunks(),
         test_roundtrip_4326(),
         test_coords_match_window(),
+        test_rect_subtract_against_mask(),
+        test_rects_bbox(),
     ])
 
 

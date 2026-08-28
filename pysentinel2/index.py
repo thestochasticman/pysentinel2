@@ -4,9 +4,14 @@ Three tables, no pixels:
 
 - ``scenes`` — every STAC item ever seen (solar day, cloud cover, full item
   JSON), so day selection and re-fills work offline without re-hitting STAC.
-- ``chunks`` — which ``(solar_day, cy, cx)`` cells of the grid are populated.
-  A cell present here is on disk and complete; absence means never fetched.
-  This is the dedup ledger: nothing in it is ever downloaded again.
+- ``coverage`` — which pixel rectangles of the grid are populated per solar
+  day. A region covered here is on disk and complete; anything outside is
+  never-fetched. This is the dedup ledger at pixel exactness: fills only
+  ever write axis-aligned windows, so a day's coverage is a short list of
+  rects, and missing work is ``grid.rect_subtract(window, covered)``.
+  (Earlier versions accounted in fixed 256 px chunks — the ``chunks``
+  table — which forced downloads to pad small farms by up to ~3.6x; old
+  ledgers migrate automatically on open.)
 - ``searches`` — which (bbox, date-range) regions STAC has been queried
   for, so "no scenes" is distinguishable from "never asked".
 
@@ -34,6 +39,16 @@ CREATE TABLE IF NOT EXISTS chunks (
     PRIMARY KEY (solar_day, cy, cx)
 ) WITHOUT ROWID;
 
+CREATE TABLE IF NOT EXISTS coverage (
+    solar_day  TEXT NOT NULL,
+    row0       INTEGER NOT NULL,
+    row1       INTEGER NOT NULL,
+    col0       INTEGER NOT NULL,
+    col1       INTEGER NOT NULL,
+    written_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS coverage_by_day ON coverage(solar_day);
+
 CREATE TABLE IF NOT EXISTS searches (
     x0 REAL NOT NULL, y0 REAL NOT NULL,
     x1 REAL NOT NULL, y1 REAL NOT NULL,
@@ -56,6 +71,46 @@ class Index:
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.executescript(_SCHEMA)
         self.db.commit()
+        self._migrate_chunks_to_coverage()
+
+    def _migrate_chunks_to_coverage(self) -> None:
+        """One-time, idempotent: convert legacy 256 px chunk marks to rects.
+
+        Each ``(day, cy, cx)`` row is the rect ``(cy*256, cy*256+256,
+        cx*256, cx*256+256)``; runs of chunks adjacent along x coalesce
+        into one rect per (day, cy) run — exactness matters, minimality
+        does not. Runs only when the legacy table has rows and coverage
+        is empty, all inside one transaction; legacy rows are kept (the
+        table is dead weight, dropped in a later release).
+        """
+        has_legacy = self.db.execute('SELECT 1 FROM chunks LIMIT 1').fetchone()
+        has_coverage = self.db.execute('SELECT 1 FROM coverage LIMIT 1').fetchone()
+        if not has_legacy or has_coverage:
+            return
+        CHUNK = 256
+        now = _now()
+        rows = self.db.execute(
+            'SELECT solar_day, cy, cx FROM chunks ORDER BY solar_day, cy, cx'
+        ).fetchall()
+        rects = []
+        run = None   # (day, cy, cx_start, cx_end_exclusive)
+        for day, cy, cx in rows:
+            if run is not None and run[0] == day and run[1] == cy and run[3] == cx:
+                run = (day, cy, run[2], cx + 1)
+                continue
+            if run is not None:
+                d, y, x0, x1 = run
+                rects.append((d, y * CHUNK, (y + 1) * CHUNK, x0 * CHUNK, x1 * CHUNK, now))
+            run = (day, cy, cx, cx + 1)
+        if run is not None:
+            d, y, x0, x1 = run
+            rects.append((d, y * CHUNK, (y + 1) * CHUNK, x0 * CHUNK, x1 * CHUNK, now))
+        with self.db:
+            self.db.executemany(
+                'INSERT INTO coverage (solar_day, row0, row1, col0, col1, written_at) '
+                'VALUES (?, ?, ?, ?, ?, ?)', rects)
+        print(f'pysentinel2: migrated {len(rows)} legacy chunk marks '
+              f'to {len(rects)} coverage rects')
 
     # -- searches ---------------------------------------------------------
 
@@ -102,35 +157,33 @@ class Index:
             by_day.setdefault(day, []).append(json.loads(item_json))
         return by_day
 
-    # -- chunks -----------------------------------------------------------
+    # -- coverage ---------------------------------------------------------
 
-    def chunks_done(self, solar_day: str, chunks: list[tuple[int, int]]) -> set[tuple[int, int]]:
-        """Subset of ``chunks`` already populated for ``solar_day``."""
-        rows = self.db.execute(
-            'SELECT cy, cx FROM chunks WHERE solar_day = ?', (solar_day,)
+    def covered_rects(self, solar_day: str) -> list[tuple[int, int, int, int]]:
+        """Pixel rects ``(row0, row1, col0, col1)`` populated for the day."""
+        return self.db.execute(
+            'SELECT row0, row1, col0, col1 FROM coverage WHERE solar_day = ?',
+            (solar_day,),
         ).fetchall()
-        return set(rows) & set(chunks)
 
-    def mark_chunks(self, solar_day: str, chunks: list[tuple[int, int]]) -> None:
-        now = _now()
+    def mark_rect(self, solar_day: str, rect: tuple[int, int, int, int]) -> None:
+        """Record a written pixel window. Call strictly after the write."""
+        row0, row1, col0, col1 = rect
         with self.db:
-            self.db.executemany(
-                'INSERT OR REPLACE INTO chunks (solar_day, cy, cx, written_at) '
-                'VALUES (?, ?, ?, ?)',
-                [(solar_day, cy, cx, now) for cy, cx in chunks],
+            self.db.execute(
+                'INSERT INTO coverage (solar_day, row0, row1, col0, col1, written_at) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                (solar_day, row0, row1, col0, col1, _now()),
             )
 
-    def unmark_chunks(self, solar_day: str, chunks: list[tuple[int, int]]) -> None:
-        """Remove cells from the ledger so the next fill re-downloads them.
+    def unmark_day(self, solar_day: str) -> None:
+        """Drop a day's coverage so the next fill re-downloads it.
 
         Used by :meth:`pysentinel2.cube.Cube.repair` when stored pixels
         turn out to be download failures rather than real data gaps.
         """
         with self.db:
-            self.db.executemany(
-                'DELETE FROM chunks WHERE solar_day = ? AND cy = ? AND cx = ?',
-                [(solar_day, cy, cx) for cy, cx in chunks],
-            )
+            self.db.execute('DELETE FROM coverage WHERE solar_day = ?', (solar_day,))
 
     def close(self) -> None:
         self.db.close()
@@ -150,12 +203,44 @@ def test_search_coverage():
     return inside and not outside_space and not outside_time
 
 
-def test_chunks_ledger():
+def test_coverage_ledger():
     ix = _tmp_index()
-    ix.mark_chunks('2024-01-03', [(1, 1), (1, 2)])
-    done = ix.chunks_done('2024-01-03', [(1, 1), (1, 2), (1, 3)])
-    other_day = ix.chunks_done('2024-01-08', [(1, 1)])
-    return done == {(1, 1), (1, 2)} and other_day == set()
+    ix.mark_rect('2024-01-03', (100, 200, 50, 300))
+    ix.mark_rect('2024-01-03', (200, 250, 50, 300))
+    same_day = ix.covered_rects('2024-01-03')
+    other_day = ix.covered_rects('2024-01-08')
+    ix.unmark_day('2024-01-03')
+    return (same_day == [(100, 200, 50, 300), (200, 250, 50, 300)]
+            and other_day == [] and ix.covered_rects('2024-01-03') == [])
+
+
+def test_chunk_migration():
+    """Legacy chunk rows must convert to rects covering identical pixels."""
+    import numpy as np
+    ix = _tmp_index()
+    legacy = [('2024-01-03', 1, 1), ('2024-01-03', 1, 2), ('2024-01-03', 3, 7),
+              ('2024-01-08', 2, 2)]
+    with ix.db:
+        ix.db.executemany(
+            "INSERT INTO chunks (solar_day, cy, cx, written_at) VALUES (?, ?, ?, 't')",
+            legacy)
+    ix.close()
+    ix = Index(ix.path)   # reopen triggers migration
+    for day in ('2024-01-03', '2024-01-08'):
+        want = np.zeros((1200, 2400), dtype=bool)
+        for d, cy, cx in legacy:
+            if d == day:
+                want[cy * 256:(cy + 1) * 256, cx * 256:(cx + 1) * 256] = True
+        got = np.zeros_like(want)
+        for r0, r1, c0, c1 in ix.covered_rects(day):
+            got[r0:r1, c0:c1] = True
+        if not (got == want).all():
+            return False
+    # idempotent: reopening again must not duplicate rects
+    n = len(ix.covered_rects('2024-01-03'))
+    ix.close()
+    ix = Index(ix.path)
+    return len(ix.covered_rects('2024-01-03')) == n
 
 
 def test_scenes_cloud_filter():
@@ -175,7 +260,8 @@ def test_scenes_cloud_filter():
 def test():
     return all([
         test_search_coverage(),
-        test_chunks_ledger(),
+        test_coverage_ledger(),
+        test_chunk_migration(),
         test_scenes_cloud_filter(),
     ])
 
