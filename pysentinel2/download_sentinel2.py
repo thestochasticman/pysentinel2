@@ -103,12 +103,53 @@ def test_overlapping_query_downloads_only_new_cells():
     return 0 <= downloaded < total_px
 
 
+def test_ring_fill_downloads_only_frame():
+    """Coverage fully inside the ROI: fill must fetch only the ring.
+
+    An interior ~1/3 of the window is marked covered for every candidate
+    day before filling; the reported download must equal the frame area
+    times the day count, and a repeat fill must report 0.
+    """
+    import tempfile
+    from borevitz_lab.config import Config
+    from pysentinel2.cube import Cube
+    from pysentinel2 import grid
+
+    tmpdir = tempfile.mkdtemp(prefix='pysentinel2_ring_test_')
+    cfg = Config(out_dir=tmpdir, tmp_dir=tmpdir)
+    cube = Cube(config=cfg)
+
+    w = grid.tight_window_for_bbox(_TEST_BBOX)
+    r0, r1, c0, c1 = w
+    h, wd = r1 - r0, c1 - c0
+    island = (r0 + h // 3, r0 + 2 * (h // 3), c0 + wd // 3, c0 + 2 * (wd // 3))
+    island_area = (island[1] - island[0]) * (island[3] - island[2])
+    frame_area = h * wd - island_area
+
+    # Fill the whole range once (searches + downloads), then rewrite the
+    # ledger so only the interior island is covered: the next fill must
+    # download exactly the frame around it, per day.
+    cube.fill(_TEST_BBOX, _TEST_START, _TEST_END)
+    ix = cube._index()
+    days = list(ix.scenes_for_range(_TEST_START, _TEST_END, cube.sentinel2.max_cloud_cover))
+    for d in days:
+        ix.unmark_day(d)
+        ix.mark_rect(d, island)
+    ix.close()
+
+    downloaded = cube.fill(_TEST_BBOX, _TEST_START, _TEST_END)
+    again = cube.fill(_TEST_BBOX, _TEST_START, _TEST_END)
+    return (len(days) > 0 and downloaded == frame_area * len(days)
+            and again == 0)
+
+
 def test():
     return all([
         test_internet(None),
         test_download_returns_data(),
         test_repeat_query_downloads_nothing(),
         test_overlapping_query_downloads_only_new_cells(),
+        test_ring_fill_downloads_only_frame(),
     ])
 
 

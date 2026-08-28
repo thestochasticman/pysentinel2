@@ -216,6 +216,31 @@ def to_float(ds: Dataset, dtype: str = 'float32') -> Dataset:
     return out
 
 
+def _plan_day_windows(window, covered,
+                      min_fill: float = 0.9, max_rects: int = 8):
+    """Load windows for one day: the missing region as its own rects, or
+    their bbox when that is barely bigger.
+
+    Returns ``[]`` when the day is fully covered. When the missing rects
+    fill at least ``min_fill`` of their bounding box (or fragment past
+    ``max_rects``), one bbox load wins. Otherwise (a ring or L around
+    covered data — a district requested around an already-downloaded
+    farm) each missing rect loads separately, so covered pixels are
+    never re-fetched. The threshold is deliberately high: loads batch
+    across days, so an extra rect costs a handful of load calls per
+    ~60-day batch while the byte saving applies to every day.
+    """
+    missing = grid.rect_subtract(window, covered)
+    if not missing:
+        return []
+    bbox = grid.rects_bbox(missing)
+    bbox_area = (bbox[1] - bbox[0]) * (bbox[3] - bbox[2])
+    missing_area = sum((r1 - r0) * (c1 - c0) for r0, r1, c0, c1 in missing)
+    if missing_area / bbox_area >= min_fill or len(missing) > max_rects:
+        return [bbox]
+    return missing
+
+
 def _window_wants_reflectance(fm: np.ndarray, sentinel2: Sentinel2,
                               threshold: float | None = None) -> bool:
     """Would the removed download screen have fetched reflectance here?
@@ -275,15 +300,6 @@ def _day_group(store, day: str):
     group = zarr.open_group(store, path=day, mode='a', use_consolidated=False)
     group.attrs['crs'] = grid.CRS
     return group
-
-
-def _crop_to_window(ds: Dataset, outer, inner) -> Dataset:
-    """Crop a dataset loaded on pixel window ``outer`` down to ``inner``."""
-    if outer == inner:
-        return ds
-    row0, _, col0, _ = outer
-    r0, r1, c0, c1 = inner
-    return ds.isel(y=slice(r0 - row0, r1 - row0), x=slice(c0 - col0, c1 - col0))
 
 
 @frozen
@@ -357,88 +373,75 @@ class Cube:
                 s._search_stac(ix, window, bbox6933, start, end)
 
             by_day = ix.scenes_for_range(start, end, s.sentinel2.max_cloud_cover)
-            todo = {}     # day -> (item_dicts, day_window, n_missing_px)
+            # Work grouped by load window: a day whose missing region is a
+            # ring/L around covered data contributes one entry per missing
+            # rect (never re-fetching the covered middle); a mostly-missing
+            # day contributes its single bbox. Days sharing a window load
+            # together, so the ring case costs at most 4 group loads.
+            groups: dict[tuple, dict[str, list]] = {}
             for day, item_dicts in by_day.items():
-                missing = grid.rect_subtract(window, ix.covered_rects(day))
-                if missing:
-                    # One load region per day: the bbox of the missing
-                    # rects. It may re-cover slivers already on disk (an
-                    # L-shaped gap) — harmless, identical pixels rewrite.
-                    todo[day] = (item_dicts, grid.rects_bbox(missing),
-                                 sum((r1 - r0) * (c1 - c0)
-                                     for r0, r1, c0, c1 in missing))
-            if not todo:
+                for win in _plan_day_windows(window, ix.covered_rects(day)):
+                    groups.setdefault(win, {})[day] = item_dicts
+            if not groups:
                 return 0
 
             _configure_rio()
-            root = zarr.open_group(s.paths.store, mode='a', use_consolidated=False)
+            zarr.open_group(s.paths.store, mode='a', use_consolidated=False)
             fmask_band = s.sentinel2.cloud_mask_band
-            days_sorted = sorted(todo)
-
-            # A batch is held in RAM while it's split and written, so cap
-            # its day count by window area: ~256 MB of int16 in flight.
-            # Deliberately conservative — the lab's field machines have
-            # 8 GB RAM, and macOS answers memory pressure with SIGKILL; a
-            # smaller batch still carries plenty of dask tasks (days x
-            # chunks x bands) to keep the I/O threads saturated. Small
-            # AOIs stay at ``batch_days``; big AOIs shrink toward
-            # per-day loads.
-            n_px = (window[1] - window[0]) * (window[3] - window[2])
-            n_bands = len(s.sentinel2.bands)
-            day_batch = max(1, min(batch_days, int(256e6 / max(n_bands * 2 * n_px, 1))))
-
-            # Single pass: every band (fmask included) for a batch of days
-            # in one bulk load. A previous design fetched fmask first and
-            # screened chunks before downloading reflectance; measured on
-            # this store, the screen skipped reflectance on 8.8% of days
-            # while paying an extra COG-open round on 100% of them — in a
-            # latency-bound phase that is a net loss. Screening is gone;
-            # the STAC-level cloud_cover prefilter and read-time cleaning
-            # carry the cloud handling.
-            downloaded = 0
-            failed_days = []
             all_bands = list(s.sentinel2.bands)
             refl_bands = [b for b in all_bands if b != fmask_band]
-            for i in range(0, len(days_sorted), day_batch):
-                batch = days_sorted[i:i + day_batch]
-                # One geobox per batch: the union of the batch's missing
-                # windows, so a batch is a single load on a single grid.
-                union = grid.rects_bbox([todo[d][1] for d in batch])
-                data_by_day = s._load_days(
-                    {d: todo[d][0] for d in batch}, all_bands, union, threads)
-                for day in batch:
-                    day_window = todo[day][1]
-                    data = data_by_day.get(day)
-                    day_group = _day_group(s.paths.store, day)
-                    if data is None:
-                        # A searched day whose items yielded no pixels:
-                        # store the empty fmask so reads see nodata, mark.
-                        s._write_band(day_group, fmask_band, None, day_window,
-                                      np.dtype('uint8'), 0)
-                        ix.mark_rect(day, day_window)
-                        downloaded += todo[day][2]
-                        continue
-                    data = _crop_to_window(data, union, day_window)
-                    # Integrity gate: fail_on_error=False turns failed HTTP
-                    # reads into silent nodata. A band that is mostly nodata
-                    # where the day's own fmask has valid ground is a failed
-                    # download, not a data gap — writing and marking it would
-                    # poison the store permanently. Leave the day unmarked
-                    # (and unwritten) so the next fill retries it.
-                    if _reflectance_looks_failed(data, refl_bands, s.sentinel2):
-                        failed_days.append(day)
-                        continue
-                    s._write_band(day_group, fmask_band, data[fmask_band],
-                                  day_window, np.dtype('uint8'), 0)
-                    for band in refl_bands:
-                        s._write_band(day_group, band, data[band], day_window,
-                                      np.dtype('int16'), -999)
-                    ix.mark_rect(day, day_window)
-                    downloaded += todo[day][2]
-            if failed_days:
-                print(f'pysentinel2: {len(failed_days)} day(s) failed download '
-                      f'integrity and were left unmarked for retry: '
-                      f'{failed_days[:5]}{"..." if len(failed_days) > 5 else ""}')
+
+            # Single pass: every band (fmask included) for a batch of days
+            # in one bulk load per window group. (An earlier fmask-first
+            # screen was removed after measurement: 8.8% of days' bytes
+            # saved for an extra request round on every day.)
+            downloaded = 0
+            failed = []
+            for win, day_items in groups.items():
+                # A batch is held in RAM while it's split and written, so
+                # cap its day count by window area: ~256 MB of int16 in
+                # flight — the lab's field machines have 8 GB RAM, and
+                # macOS answers memory pressure with SIGKILL.
+                n_px = (win[1] - win[0]) * (win[3] - win[2])
+                win_area = n_px
+                day_batch = max(1, min(batch_days,
+                                       int(256e6 / max(len(all_bands) * 2 * n_px, 1))))
+                days_sorted = sorted(day_items)
+                for i in range(0, len(days_sorted), day_batch):
+                    batch = days_sorted[i:i + day_batch]
+                    data_by_day = s._load_days(
+                        {d: day_items[d] for d in batch}, all_bands, win, threads)
+                    for day in batch:
+                        data = data_by_day.get(day)
+                        day_group = _day_group(s.paths.store, day)
+                        if data is None:
+                            # A searched day whose items yielded no pixels:
+                            # store the empty fmask so reads see nodata, mark.
+                            s._write_band(day_group, fmask_band, None, win,
+                                          np.dtype('uint8'), 0)
+                            ix.mark_rect(day, win)
+                            downloaded += win_area
+                            continue
+                        # Integrity gate: fail_on_error=False turns failed
+                        # HTTP reads into silent nodata. A band mostly nodata
+                        # where the day's own fmask has valid ground is a
+                        # failed download, not a data gap — writing and
+                        # marking it would poison the store permanently.
+                        # Leave it unmarked (and unwritten) for retry.
+                        if _reflectance_looks_failed(data, refl_bands, s.sentinel2):
+                            failed.append((day, win))
+                            continue
+                        s._write_band(day_group, fmask_band, data[fmask_band],
+                                      win, np.dtype('uint8'), 0)
+                        for band in refl_bands:
+                            s._write_band(day_group, band, data[band], win,
+                                          np.dtype('int16'), -999)
+                        ix.mark_rect(day, win)
+                        downloaded += win_area
+            if failed:
+                print(f'pysentinel2: {len(failed)} (day, window) load(s) failed '
+                      f'download integrity and were left unmarked for retry: '
+                      f'{failed[:3]}{"..." if len(failed) > 3 else ""}')
             return downloaded
         finally:
             ix.close()
@@ -913,6 +916,24 @@ def test_snow_excluded_from_frame_gate():
     )
 
 
+def test_plan_day_windows():
+    """Ring around a covered island -> the 4 frame rects; small covered
+    corner -> single bbox; fully covered -> no work; fully missing ->
+    the window itself; heavy fragmentation -> bbox fallback."""
+    from pysentinel2.cube import _plan_day_windows
+    w = (0, 100, 0, 100)
+    ring = _plan_day_windows(w, [(30, 60, 40, 80)])         # 12% island
+    corner = _plan_day_windows(w, [(0, 10, 0, 10)])          # 1% covered
+    covered = _plan_day_windows(w, [(0, 100, 0, 100)])
+    empty = _plan_day_windows(w, [])
+    frag = _plan_day_windows(w, [(i, i + 2, 10, 90) for i in range(10, 90, 10)])
+    ring_area = sum((r1 - r0) * (c1 - c0) for r0, r1, c0, c1 in ring)
+    return (len(ring) == 4 and ring_area == 100 * 100 - 30 * 40
+            and len(corner) == 1                              # bbox fallback
+            and covered == [] and empty == [(0, 100, 0, 100)]
+            and len(frag) == 1)                               # fragmentation cap
+
+
 def test_screen_legacy_recognition():
     """Repair's fmask-only-day recognition: clear window wants
     reflectance, cloudy window does not, off-swath window does not."""
@@ -955,6 +976,7 @@ def test():
         test_snow_masked_water_kept_by_default(),
         test_snow_excluded_from_frame_gate(),
         test_screen_legacy_recognition(),
+        test_plan_day_windows(),
         test_query_adapters_match_agnostic_calls(),
     ])
 

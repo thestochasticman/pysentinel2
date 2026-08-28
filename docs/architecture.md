@@ -66,7 +66,7 @@ flowchart TD
     D --> E["upsert full item JSON per scene;<br/>record the search extent"]
     C -- "yes" --> F["index.scenes_for_range:<br/>solar days ≤ max_cloud_cover"]
     E --> F
-    F --> G["plan: tight window − coverage rects<br/>per day → missing pixel rects"]
+    F --> G["plan: tight window − coverage rects per day;<br/>ring/L gaps load per rect, else one bbox"]
     G --> H["<b>bulk load</b> — all 11 bands,<br/>one odc.stac.load per ≤64-day batch"]
     H --> I{"integrity gate per day:<br/>reflectance mostly nodata where<br/>fmask has valid ground?"}
     I -- "fails (bad HTTP reads)" --> J["skip: day left unwritten and<br/>unmarked — next fill retries"]
