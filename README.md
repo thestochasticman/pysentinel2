@@ -49,7 +49,7 @@ off-swath days are all stored raw and classified at read time.*
 
 ## Usage
 
-The core API is **query-agnostic** — just a bbox and dates, no setup:
+The core API is **troi-agnostic** — just a bbox and dates, no setup:
 
 ```python
 from datetime import date
@@ -66,20 +66,20 @@ ds     = cube.get_ds(bbox, date(2024, 1, 1), date(2024, 12, 31),
 cube.fill(bbox, date(2024, 1, 1), date(2024, 12, 31))  # → 0: already local
 ```
 
-Pipelines that speak the shared `borevitz_lab.query.Query` (the
+Pipelines that speak the shared `troi.troi.Troi` (the
 reproducibility layer — stubs, registry) use the adapters:
 
 ```python
-ds = cube.get_ds_query(query)            # = cube.get_ds(query.bbox, query.start, query.end)
+ds = cube.get_ds_troi(troi)            # = cube.get_ds(troi.bbox, troi.start, troi.end)
 ```
 
-`download_sentinel2(query)` and `clean_sentinel2(query)` remain as thin
-wrappers over `Cube.get_ds_query` for pipeline compatibility.
+`download_sentinel2(troi)` and `clean_sentinel2(troi)` remain as thin
+wrappers over `Cube.get_ds_troi` for pipeline compatibility.
 
 Package design (shared across the lab's packages — no inheritance,
 composition only):
 
-- **`Query`** (from `borevitz-lab`) — identity: what region, what dates.
+- **`Troi`** (from `troi`) — identity: what region, what dates.
 - **`Sentinel2`** (`pysentinel2.sentinel2`) — config: STAC URL,
   collections, bands, CRS, cloud threshold, fmask codes.
 - **`Paths`** (`pysentinel2.paths`) — derived locations of the store for
@@ -151,14 +151,14 @@ conda install -c conda-forge -c thestochasticman pysentinel2
 
 ### From source
 
-All lab repos share one conda environment, `borevitz_lab` — each repo's
+All lab repos share one conda environment, `troi` — each repo's
 `environment.yml` creates it if missing and adds its own packages if it
 exists (never use `--prune`):
 
 ```bash
-conda env update -n borevitz_lab -f environment.yml
-conda activate borevitz_lab
-pip install -e ../borevitz_lab   # shared core (not yet on PyPI)
+conda env update -n troi -f environment.yml
+conda activate troi
+pip install -e ../troi   # shared core (not yet on PyPI)
 pip install -e .
 ```
 

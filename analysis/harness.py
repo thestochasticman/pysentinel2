@@ -19,7 +19,7 @@ Outputs, under analysis/data/:
   the nearest fmask cloud/shadow, normalised by the far-field (>12 px)
   value of the same frame — the empirical basis for choosing buffer_px
 
-Run inside the borevitz_lab environment:  python analysis/harness.py
+Run inside the troi environment:  python analysis/harness.py
 Fills are incremental; re-runs are served from the machine-wide cube.
 """
 import os

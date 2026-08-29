@@ -127,7 +127,7 @@ sequenceDiagram
 
 Locations derive from the shared lab `Config`
 (`pysentinel2/paths.py`). The store is keyed by data root, not by
-query: every query on the machine reads and fills the same cube.
+troi: every troi on the machine reads and fills the same cube.
 
 ```python
 from pysentinel2.paths import Paths

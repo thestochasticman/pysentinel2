@@ -54,13 +54,13 @@ Because the window is chunk-aligned:
 
 - every write covers complete chunks, so the index ledger can record a
   cell as *done* without partial-write ambiguity;
-- the requested window is the same set of bytes no matter which query
+- the requested window is the same set of bytes no matter which troi
   produced it.
 
 ## Deduplication in practice
 
-The figure below shows two queries over the example area. Query B is
-displaced roughly 2 km east and 1.3 km south of query A. Both snap
+The figure below shows two queries over the example area. Troi B is
+displaced roughly 2 km east and 1.3 km south of troi A. Both snap
 outward to 2 × 2-chunk windows; two chunks coincide. When B runs after
 A, only B's two new chunks are fetched — the shared chunks are served
 from the store.

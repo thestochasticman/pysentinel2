@@ -17,8 +17,8 @@ date ranges and repeat runs all reuse the same chunks. Only the raw
 bands (incl. fmask) are stored; ``get_ds(..., clean=True)`` applies cloud
 masking on read, so no second "clean" copy exists on disk.
 
-The core API is query-agnostic (bbox + dates — the data layer);
-``get_ds_query`` / ``fill_query`` adapt a :class:`borevitz_lab.query.Query`
+The core API is troi-agnostic (bbox + dates — the data layer);
+``get_ds_troi`` / ``fill_troi`` adapt a :class:`troi.troi.Troi`
 (the reproducibility layer) onto it.
 """
 
@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from os import makedirs
 from xarray import Dataset
 
-from borevitz_lab.config import Config, config as default_config
+from troi.config import Config, config as default_config
 from pysentinel2 import grid
 from pysentinel2.index import Index
 from pysentinel2.paths import Paths
@@ -306,7 +306,7 @@ def _day_group(store, day: str):
 class Cube:
     """The machine-wide Sentinel-2 store: one grid, one index, zero re-downloads.
 
-    Composed from :class:`borevitz_lab.config.Config` (where the store
+    Composed from :class:`troi.config.Config` (where the store
     lives) and :class:`pysentinel2.sentinel2.Sentinel2` (what to fetch and
     from where). No inheritance.
 
@@ -318,7 +318,7 @@ class Cube:
         cube = Cube()
         ds  = cube.get_ds(bbox, date(2024, 1, 1), date(2024, 6, 30))  # fills gaps, returns raw window
         dsc = cube.get_ds(bbox, date(2024, 1, 1), date(2024, 6, 30), clean=True)
-        dsq = cube.get_ds_query(query)        # same, for pipelines that speak Query
+        dsq = cube.get_ds_troi(troi)        # same, for pipelines that speak Troi
         ```
     """
 
@@ -341,8 +341,8 @@ class Cube:
         """Ensure every pixel of ``bbox``'s tight window is populated for
         every candidate solar day in ``[start, end]``.
 
-        Query-agnostic: takes the region and range directly, no
-        :class:`borevitz_lab.query.Query` (and none of its registry/dir side
+        Troi-agnostic: takes the region and range directly, no
+        :class:`troi.troi.Troi` (and none of its registry/dir side
         effects) required. Coverage accounting is pixel-exact: each day's
         missing region is the tight window minus its recorded coverage
         rects, so small farms pay no chunk padding (the previous 256 px
@@ -611,8 +611,8 @@ class Cube:
         """Return the Sentinel-2 window for ``bbox`` x ``[start, end]``,
         downloading only what's missing first.
 
-        Query-agnostic — the data layer of the package. Pipelines that
-        speak :class:`borevitz_lab.query.Query` use :meth:`get_ds_query`.
+        Troi-agnostic — the data layer of the package. Pipelines that
+        speak :class:`troi.troi.Troi` use :meth:`get_ds_troi`.
 
         Args:
             bbox: ``[west, south, east, north]`` in EPSG:4326.
@@ -667,17 +667,17 @@ class Cube:
             ds = add_indices(ds, indices)
         return ds
 
-    # -- Query adapters (the reproducibility layer speaks Query) ----------
+    # -- Troi adapters (the reproducibility layer speaks Troi) ----------
 
-    def fill_query(s, query, threads: int = 16) -> int:
-        """:meth:`fill` for a :class:`borevitz_lab.query.Query`."""
-        return s.fill(query.bbox, query.start, query.end, threads=threads)
+    def fill_troi(s, troi, threads: int = 16) -> int:
+        """:meth:`fill` for a :class:`troi.troi.Troi`."""
+        return s.fill(troi.bbox, troi.start, troi.end, threads=threads)
 
-    def get_ds_query(s, query, clean: bool = False,
+    def get_ds_troi(s, troi, clean: bool = False,
                   indices: tuple[str, ...] = (), threads: int = 16,
                   **clean_kwargs) -> Dataset:
-        """:meth:`get_ds` for a :class:`borevitz_lab.query.Query`."""
-        return s.get_ds(query.bbox, query.start, query.end, clean=clean,
+        """:meth:`get_ds` for a :class:`troi.troi.Troi`."""
+        return s.get_ds(troi.bbox, troi.start, troi.end, clean=clean,
                      indices=indices, threads=threads, **clean_kwargs)
 
     def _read_window(s, window, days: list[str],
@@ -947,19 +947,19 @@ def test_screen_legacy_recognition():
             and not _window_wants_reflectance(nodata, defaultsentinel2))
 
 
-def test_query_adapters_match_agnostic_calls():
-    """get_ds_query/fill_query are pure delegations to the bbox+dates core."""
-    from borevitz_lab.query import Query
+def test_troi_adapters_match_agnostic_calls():
+    """get_ds_troi/fill_troi are pure delegations to the bbox+dates core."""
+    from troi.troi import Troi
     cube = _tmp_cube()
     _prime_synthetic(cube, '2024-01-18', 'synth_d', value=99)
-    q = Query(bbox=_TEST_BBOX, start=_TEST_START, end=_TEST_END,
+    q = Troi(bbox=_TEST_BBOX, start=_TEST_START, end=_TEST_END,
               stub='cube_adapter', config=cube.config)
     ds_agnostic = cube.get_ds(_TEST_BBOX, _TEST_START, _TEST_END)
-    ds_query = cube.get_ds_query(q)
+    ds_troi = cube.get_ds_troi(q)
     return (
-        cube.fill_query(q) == 0
-        and ds_query.time.size == ds_agnostic.time.size
-        and float(ds_query['nbart_red'].isel(time=0)[0, 0])
+        cube.fill_troi(q) == 0
+        and ds_troi.time.size == ds_agnostic.time.size
+        and float(ds_troi['nbart_red'].isel(time=0)[0, 0])
             == float(ds_agnostic['nbart_red'].isel(time=0)[0, 0])
     )
 
@@ -977,7 +977,7 @@ def test():
         test_snow_excluded_from_frame_gate(),
         test_screen_legacy_recognition(),
         test_plan_day_windows(),
-        test_query_adapters_match_agnostic_calls(),
+        test_troi_adapters_match_agnostic_calls(),
     ])
 
 

@@ -4,7 +4,7 @@ Pixel data comes from the cube at the default data root; anything missing
 for the example window is downloaded once from DEA on the first run, and
 every later run is served entirely from cache. Outputs land in docs/images/.
 
-Run with the borevitz_lab conda environment:
+Run with the troi conda environment:
 
     python docs/make_figures.py
 """
@@ -338,16 +338,16 @@ for b, col in ((bbox_a, BLUE), (bbox_b, ORANGE)):
                            edgecolor=col, lw=2, zorder=3))
 xa = bbox_km(bbox_a)
 xb = bbox_km(bbox_b)
-ax.text(xa[0], xa[3] + 0.09, 'query A', color=BLUE, fontsize=9.5, weight='bold')
-ax.text(xb[2], xb[1] - 0.24, 'query B  (≈2 km E, ≈1.3 km S)', color=ORANGE,
+ax.text(xa[0], xa[3] + 0.09, 'troi A', color=BLUE, fontsize=9.5, weight='bold')
+ax.text(xb[2], xb[1] - 0.24, 'troi B  (≈2 km E, ≈1.3 km S)', color=ORANGE,
         fontsize=9.5, weight='bold', ha='right')
 
 handles = [
     Patch(facecolor='#e3eefb', label=f'chunks only A ({len(ca - cb)})'),
     Patch(facecolor='#fbe6dd', label=f'chunks only B ({len(cb - ca)})'),
     Patch(facecolor='#bcd9f5', label=f'shared — downloaded once ({len(shared)})'),
-    Line2D([], [], color=BLUE, lw=2, label='query A bbox'),
-    Line2D([], [], color=ORANGE, lw=2, label='query B bbox'),
+    Line2D([], [], color=BLUE, lw=2, label='troi A bbox'),
+    Line2D([], [], color=ORANGE, lw=2, label='troi B bbox'),
 ]
 ax.legend(handles=handles, frameon=False, fontsize=8.4, loc='center left',
           bbox_to_anchor=(1.01, 0.5))

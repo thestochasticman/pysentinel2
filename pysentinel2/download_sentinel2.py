@@ -1,28 +1,28 @@
-"""Download the Sentinel-2 window for a query — via the machine-wide cube.
+"""Download the Sentinel-2 window for a troi — via the machine-wide cube.
 
 Thin compatibility wrapper: the heavy lifting (grid math, chunk-level
 dedup, STAC search caching, Zarr writes) lives in
 :class:`pysentinel2.cube.Cube`. Kept as a module so the familiar
-``download_sentinel2(query)`` entry point survives the storage refactor.
+``download_sentinel2(troi)`` entry point survives the storage refactor.
 """
 
 from xarray import Dataset
-from borevitz_lab.query import Query
+from troi.troi import Troi
 from pysentinel2.sentinel2 import Sentinel2, defaultsentinel2
 
 
 def download_sentinel2(
-    query: Query,
+    troi: Troi,
     threads_per_worker: int = 8,
     sentinel2: Sentinel2 = defaultsentinel2,
 ) -> Dataset:
-    """Return the raw Sentinel-2 cube window (incl. fmask) for ``query``.
+    """Return the raw Sentinel-2 cube window (incl. fmask) for ``troi``.
 
     Fills only the (day x chunk) cells of the shared cube that no previous
-    query has populated — repeat or overlapping queries re-download nothing.
+    troi has populated — repeat or overlapping queries re-download nothing.
 
     Args:
-        query: The :class:`borevitz_lab.query.Query` describing region + range.
+        troi: The :class:`troi.troi.Troi` describing region + range.
         threads_per_worker: I/O concurrency for any downloads triggered.
         sentinel2: STAC/band/cloud configuration; defaults to the DEA config.
 
@@ -30,8 +30,8 @@ def download_sentinel2(
         xarray.Dataset with dims ``(time, y, x)`` on the fixed grid.
     """
     from pysentinel2.cube import Cube
-    cube = Cube(config=query.config, sentinel2=sentinel2)
-    return cube.get_ds_query(query, threads=threads_per_worker)
+    cube = Cube(config=troi.config, sentinel2=sentinel2)
+    return cube.get_ds_troi(troi, threads=threads_per_worker)
 
 
 def test_internet(s):
@@ -54,7 +54,7 @@ def _shared_test_cfg():
     global _test_cfg
     if _test_cfg is None:
         import tempfile
-        from borevitz_lab.config import Config
+        from troi.config import Config
         tmpdir = tempfile.mkdtemp(prefix='pysentinel2_s2_test_')
         _test_cfg = Config(out_dir=tmpdir, tmp_dir=tmpdir)
     return _test_cfg
@@ -62,7 +62,7 @@ def _shared_test_cfg():
 
 def test_download_returns_data():
     """A live download returns a non-empty window with the requested bands."""
-    q = Query(
+    q = Troi(
         bbox=_TEST_BBOX, start=_TEST_START, end=_TEST_END,
         stub='s2_live', config=_shared_test_cfg(),
     )
@@ -70,36 +70,36 @@ def test_download_returns_data():
     return ds.time.size > 0 and 'nbart_red' in ds.data_vars and 'oa_fmask' in ds.data_vars
 
 
-def test_repeat_query_downloads_nothing():
-    """Second identical query → fill() reports 0 cells downloaded."""
+def test_repeat_troi_downloads_nothing():
+    """Second identical troi → fill() reports 0 cells downloaded."""
     from pysentinel2.cube import Cube
-    q = Query(
+    q = Troi(
         bbox=_TEST_BBOX, start=_TEST_START, end=_TEST_END,
         stub='s2_repeat', config=_shared_test_cfg(),
     )
     download_sentinel2(q)
-    return Cube(config=q.config).fill_query(q) == 0
+    return Cube(config=q.config).fill_troi(q) == 0
 
 
-def test_overlapping_query_downloads_only_new_cells():
+def test_overlapping_troi_downloads_only_new_cells():
     """A bbox shifted ~1 km east reuses covered pixels — the downloaded
     (day x pixel) count is strictly less than the shifted window's total,
     matching the uncovered strip exactly."""
     from pysentinel2.cube import Cube
     from pysentinel2 import grid
     cfg = _shared_test_cfg()
-    q1 = Query(bbox=_TEST_BBOX, start=_TEST_START, end=_TEST_END,
+    q1 = Troi(bbox=_TEST_BBOX, start=_TEST_START, end=_TEST_END,
                stub='s2_overlap_a', config=cfg)
     download_sentinel2(q1)
 
     shifted = [_TEST_BBOX[0] + 0.01, _TEST_BBOX[1], _TEST_BBOX[2] + 0.01, _TEST_BBOX[3]]
-    q2 = Query(bbox=shifted, start=_TEST_START, end=_TEST_END,
+    q2 = Troi(bbox=shifted, start=_TEST_START, end=_TEST_END,
                stub='s2_overlap_b', config=cfg)
     cube = Cube(config=cfg)
     n_days = len(cube._index().scenes_for_range(q2.start, q2.end, cube.sentinel2.max_cloud_cover))
     w = grid.tight_window_for_bbox(q2.bbox)
     total_px = (w[1] - w[0]) * (w[3] - w[2]) * max(n_days, 1)
-    downloaded = cube.fill_query(q2)
+    downloaded = cube.fill_troi(q2)
     return 0 <= downloaded < total_px
 
 
@@ -111,7 +111,7 @@ def test_ring_fill_downloads_only_frame():
     times the day count, and a repeat fill must report 0.
     """
     import tempfile
-    from borevitz_lab.config import Config
+    from troi.config import Config
     from pysentinel2.cube import Cube
     from pysentinel2 import grid
 
@@ -147,8 +147,8 @@ def test():
     return all([
         test_internet(None),
         test_download_returns_data(),
-        test_repeat_query_downloads_nothing(),
-        test_overlapping_query_downloads_only_new_cells(),
+        test_repeat_troi_downloads_nothing(),
+        test_overlapping_troi_downloads_only_new_cells(),
         test_ring_fill_downloads_only_frame(),
     ])
 

@@ -36,7 +36,7 @@ classifiers = [
 # here so `pip install -e .` is fast and doesn't re-resolve it.
 dependencies = [
   "attrs",
-  "borevitz-lab",
+  "troi",
   "typing_extensions",
 ]
 

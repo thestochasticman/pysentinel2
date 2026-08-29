@@ -9,9 +9,9 @@ suite (`python pysentinel2/<module>.py` → `True`).
 
 ```mermaid
 flowchart TD
-    subgraph borevitz_lab["borevitz-lab (shared core)"]
+    subgraph troi["troi (shared core)"]
         CFG["Config<br/><i>where data lives</i>"]
-        QRY["Query<br/><i>reproducibility layer:<br/>bbox, dates, stub, registry</i>"]
+        QRY["Troi<br/><i>reproducibility layer:<br/>bbox, dates, stub, registry</i>"]
     end
 
     subgraph pysentinel2
@@ -21,7 +21,7 @@ flowchart TD
         IX["Index<br/><i>SQLite ledger</i>"]
         CB["Cube<br/><i>fill · read · clean · derive</i>"]
         DRV["derive<br/><i>spectral indices</i>"]
-        DL["download_sentinel2 / clean_sentinel2<br/><i>thin Query-compatible wrappers</i>"]
+        DL["download_sentinel2 / clean_sentinel2<br/><i>thin Troi-compatible wrappers</i>"]
     end
 
     CFG --> P
@@ -42,11 +42,11 @@ flowchart TD
 | `Index` | `pysentinel2/index.py` | The SQLite ledger of populated cells, seen scenes, and past searches — see [Storage & index](storage.md). |
 | `Cube` | `pysentinel2/cube.py` | Orchestration: diff → fill → read → (optionally) clean → (optionally) derive. |
 | `derive` | `pysentinel2/derive.py` | On-read spectral indices — see [Spectral indices](indices.md). |
-| wrappers | `download_sentinel2.py`, `clean_sentinel2.py` | Compatibility entry points for pipelines that speak `borevitz_lab.query.Query`. |
+| wrappers | `download_sentinel2.py`, `clean_sentinel2.py` | Compatibility entry points for pipelines that speak `troi.troi.Troi`. |
 
-The core API is deliberately query-agnostic — `Cube.get_ds(bbox,
-start, end)` needs nothing but a region and a date range. The `Query`
-adapters (`get_ds_query`, `fill_query`) exist so pipelines built on the
+The core API is deliberately troi-agnostic — `Cube.get_ds(bbox,
+start, end)` needs nothing but a region and a date range. The `Troi`
+adapters (`get_ds_troi`, `fill_troi`) exist so pipelines built on the
 lab's reproducibility layer plug in without translation code.
 
 ## The `fill` algorithm

@@ -1,13 +1,13 @@
 """Derived on-disk locations of the machine-wide Sentinel-2 cube.
 
-The cube is keyed by :class:`borevitz_lab.config.Config` (one store per
-data root, shared by every query on this machine), not per-Query — that's
+The cube is keyed by :class:`troi.config.Config` (one store per
+data root, shared by every troi on this machine), not per-Troi — that's
 the whole point: all queries read and fill the same store. Rule of thumb
 across the lab's packages: user-settable inputs → Config, derived
 locations → Paths. No inheritance — composition only.
 """
 from attrs import frozen, field
-from borevitz_lab.config import Config, config as default_config
+from troi.config import Config, config as default_config
 
 
 @frozen
@@ -15,7 +15,7 @@ class Paths:
     """Where the pysentinel2 cube lives for a given Config.
 
     Attributes:
-        config: The :class:`borevitz_lab.config.Config` supplying the data root.
+        config: The :class:`troi.config.Config` supplying the data root.
         root: Cube directory (``{config.tmp_dir}/sentinel2_cube``).
         store: The sparse Zarr store holding every downloaded pixel.
         index_db: SQLite index of populated chunks / seen scenes / searches.
@@ -25,8 +25,8 @@ class Paths:
         from pysentinel2.paths import Paths
 
         paths = Paths()
-        paths.store     # '~/Downloads/BorevitzLab-Tmp/sentinel2_cube/cube.zarr'
-        paths.index_db  # '~/Downloads/BorevitzLab-Tmp/sentinel2_cube/index.db'
+        paths.store     # '~/Downloads/Troi-Tmp/sentinel2_cube/cube.zarr'
+        paths.index_db  # '~/Downloads/Troi-Tmp/sentinel2_cube/index.db'
         ```
     """
 
