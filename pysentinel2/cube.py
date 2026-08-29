@@ -18,7 +18,7 @@ bands (incl. fmask) are stored; ``get_ds(..., clean=True)`` applies cloud
 masking on read, so no second "clean" copy exists on disk.
 
 The core API is troi-agnostic (bbox + dates — the data layer);
-``get_ds_troi`` / ``fill_troi`` adapt a :class:`troi.troi.Troi`
+``get_ds_troi`` / ``fill_troi`` adapt a :class:`troi.Troi`
 (the reproducibility layer) onto it.
 """
 
@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from os import makedirs
 from xarray import Dataset
 
-from troi.config import Config, config as default_config
+from troi import Config, config as default_config
 from pysentinel2 import grid
 from pysentinel2.index import Index
 from pysentinel2.paths import Paths
@@ -306,7 +306,7 @@ def _day_group(store, day: str):
 class Cube:
     """The machine-wide Sentinel-2 store: one grid, one index, zero re-downloads.
 
-    Composed from :class:`troi.config.Config` (where the store
+    Composed from :class:`troi.Config` (where the store
     lives) and :class:`pysentinel2.sentinel2.Sentinel2` (what to fetch and
     from where). No inheritance.
 
@@ -342,7 +342,7 @@ class Cube:
         every candidate solar day in ``[start, end]``.
 
         Troi-agnostic: takes the region and range directly, no
-        :class:`troi.troi.Troi` (and none of its registry/dir side
+        :class:`troi.Troi` (and none of its registry/dir side
         effects) required. Coverage accounting is pixel-exact: each day's
         missing region is the tight window minus its recorded coverage
         rects, so small farms pay no chunk padding (the previous 256 px
@@ -612,7 +612,7 @@ class Cube:
         downloading only what's missing first.
 
         Troi-agnostic — the data layer of the package. Pipelines that
-        speak :class:`troi.troi.Troi` use :meth:`get_ds_troi`.
+        speak :class:`troi.Troi` use :meth:`get_ds_troi`.
 
         Args:
             bbox: ``[west, south, east, north]`` in EPSG:4326.
@@ -670,13 +670,13 @@ class Cube:
     # -- Troi adapters (the reproducibility layer speaks Troi) ----------
 
     def fill_troi(s, troi, threads: int = 16) -> int:
-        """:meth:`fill` for a :class:`troi.troi.Troi`."""
+        """:meth:`fill` for a :class:`troi.Troi`."""
         return s.fill(troi.bbox, troi.start, troi.end, threads=threads)
 
     def get_ds_troi(s, troi, clean: bool = False,
                   indices: tuple[str, ...] = (), threads: int = 16,
                   **clean_kwargs) -> Dataset:
-        """:meth:`get_ds` for a :class:`troi.troi.Troi`."""
+        """:meth:`get_ds` for a :class:`troi.Troi`."""
         return s.get_ds(troi.bbox, troi.start, troi.end, clean=clean,
                      indices=indices, threads=threads, **clean_kwargs)
 
@@ -949,7 +949,7 @@ def test_screen_legacy_recognition():
 
 def test_troi_adapters_match_agnostic_calls():
     """get_ds_troi/fill_troi are pure delegations to the bbox+dates core."""
-    from troi.troi import Troi
+    from troi import Troi
     cube = _tmp_cube()
     _prime_synthetic(cube, '2024-01-18', 'synth_d', value=99)
     q = Troi(bbox=_TEST_BBOX, start=_TEST_START, end=_TEST_END,

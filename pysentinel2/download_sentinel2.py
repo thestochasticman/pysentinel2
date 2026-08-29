@@ -7,7 +7,7 @@ dedup, STAC search caching, Zarr writes) lives in
 """
 
 from xarray import Dataset
-from troi.troi import Troi
+from troi import Troi
 from pysentinel2.sentinel2 import Sentinel2, defaultsentinel2
 
 
@@ -22,7 +22,7 @@ def download_sentinel2(
     troi has populated — repeat or overlapping queries re-download nothing.
 
     Args:
-        troi: The :class:`troi.troi.Troi` describing region + range.
+        troi: The :class:`troi.Troi` describing region + range.
         threads_per_worker: I/O concurrency for any downloads triggered.
         sentinel2: STAC/band/cloud configuration; defaults to the DEA config.
 
@@ -54,7 +54,7 @@ def _shared_test_cfg():
     global _test_cfg
     if _test_cfg is None:
         import tempfile
-        from troi.config import Config
+        from troi import Config
         tmpdir = tempfile.mkdtemp(prefix='pysentinel2_s2_test_')
         _test_cfg = Config(out_dir=tmpdir, tmp_dir=tmpdir)
     return _test_cfg
@@ -111,7 +111,7 @@ def test_ring_fill_downloads_only_frame():
     times the day count, and a repeat fill must report 0.
     """
     import tempfile
-    from troi.config import Config
+    from troi import Config
     from pysentinel2.cube import Cube
     from pysentinel2 import grid
 

@@ -7,7 +7,7 @@ second store.
 """
 
 from xarray import Dataset
-from troi.troi import Troi
+from troi import Troi
 from pysentinel2.sentinel2 import Sentinel2, defaultsentinel2
 
 
@@ -20,7 +20,7 @@ def clean_sentinel2(
     """Produce a cloud-masked, frame-filtered Sentinel-2 window.
 
     Args:
-        troi: The :class:`troi.troi.Troi`. Pixels come from the
+        troi: The :class:`troi.Troi`. Pixels come from the
             shared cube (downloading only what's missing).
         ds_sentinel2: Optional in-memory raw dataset (must still include
             the fmask band); if given, it is masked directly and the cube
@@ -48,7 +48,7 @@ def test_clean_drops_fmask_band():
     """The fmask band must not appear in the cleaned dataset (live)."""
     import tempfile
     from datetime import date
-    from troi.config import Config
+    from troi import Config
 
     tmpdir = tempfile.mkdtemp(prefix='pysentinel2_clean_test_')
     cfg = Config(out_dir=tmpdir, tmp_dir=tmpdir)

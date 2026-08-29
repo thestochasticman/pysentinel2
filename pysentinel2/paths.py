@@ -1,13 +1,13 @@
 """Derived on-disk locations of the machine-wide Sentinel-2 cube.
 
-The cube is keyed by :class:`troi.config.Config` (one store per
+The cube is keyed by :class:`troi.Config` (one store per
 data root, shared by every troi on this machine), not per-Troi — that's
 the whole point: all queries read and fill the same store. Rule of thumb
 across the lab's packages: user-settable inputs → Config, derived
 locations → Paths. No inheritance — composition only.
 """
 from attrs import frozen, field
-from troi.config import Config, config as default_config
+from troi import Config, config as default_config
 
 
 @frozen
@@ -15,7 +15,7 @@ class Paths:
     """Where the pysentinel2 cube lives for a given Config.
 
     Attributes:
-        config: The :class:`troi.config.Config` supplying the data root.
+        config: The :class:`troi.Config` supplying the data root.
         root: Cube directory (``{config.tmp_dir}/sentinel2_cube``).
         store: The sparse Zarr store holding every downloaded pixel.
         index_db: SQLite index of populated chunks / seen scenes / searches.
