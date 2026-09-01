@@ -35,9 +35,22 @@ classifiers = [
 # provided by conda via environment.yml; only the lab core is declared
 # here so `pip install -e .` is fast and doesn't re-resolve it.
 dependencies = [
+  "troi @ git+https://github.com/thestochasticman/troi.git",
   "attrs",
-  "troi",
   "typing_extensions",
+  "numpy",
+  "xarray",
+  "zarr",
+  "dask",
+  "pyproj",
+  "affine",
+  "odc-stac",
+  "odc-geo",
+  "pystac",
+  "pystac-client",
+  "urllib3",
+  "opencv-python",
+  "rioxarray",
 ]
 
 [project.urls]
