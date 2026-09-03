@@ -35,7 +35,7 @@ classifiers = [
 # provided by conda via environment.yml; only the lab core is declared
 # here so `pip install -e .` is fast and doesn't re-resolve it.
 dependencies = [
-  "troi @ git+https://github.com/thestochasticman/troi.git",
+  "pytroi @ git+https://github.com/thestochasticman/troi.git",
   "attrs",
   "typing_extensions",
   "numpy",
