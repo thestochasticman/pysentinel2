@@ -4,7 +4,7 @@ A **local Sentinel-2 datacube that fills itself on demand**. Every pixel
 this machine ever downloads lands in one sparse, pixel-indexed store —
 so nothing is ever downloaded twice: overlapping areas, extended date
 ranges and repeat runs all reuse the same chunks. Part of the
-[Borevitz Lab](https://borevitzlab.anu.edu.au/) ecosystem; the default
+[Borevitz Lab](https://biology.anu.edu.au/research/research-groups/borevitz-group-plant-genomics-climate-adaption) ecosystem; the default
 source is [Digital Earth Australia](https://explorer.dea.ga.gov.au/)'s
 ARD collections (`ga_s2am_ard_3` / `ga_s2bm_ard_3`) via STAC.
 
