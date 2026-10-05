@@ -4,11 +4,19 @@ Every pixel this machine ever downloads lands in a single sparse store
 on the fixed EPSG:6933/10 m grid (:mod:`pysentinel2.grid`):
 
     {config.tmp_dir}/sentinel2_cube/
-    ├── index.db      # what's populated / what's been searched (pysentinel2.index)
-    └── cube.zarr/
-        └── 2024-01-03/   # one group per solar day, one array per band
-            ├── nbart_red # global-grid array; only written chunks exist on disk
-            └── ...
+    ├── cube.zarr/
+    │   └── 2024-01-03/   # one group per solar day, one array per band
+    │       ├── nbart_red # global-grid array; only written chunks exist on disk
+    │       └── ...
+    ├── index/        # coverage rects, seen scenes, past searches (pysentinel2.index)
+    └── claims/       # cross-node mutex dirs while a day is being written
+
+The index is files, not a database (see ``troi/docs/ledger.md``): the
+cube is filled by many PBS jobs on many Gadi nodes against one store on
+Lustre, where file locks are node-local. Fills write pixel-exact
+rectangles, which are partial Zarr chunks, so each day's writes run
+under a :class:`troi.ledger.Claim` on that day; different days never
+contend.
 
 ``Cube.get_ds(bbox, start, end)`` diffs the requested (day x chunk) cells
 against the index, downloads only the missing cells, then reads the
@@ -33,6 +41,7 @@ from os import makedirs
 from xarray import Dataset
 
 from troi import Config, config as default_config
+from troi.ledger import Claim, ensure_array, Gap, GapReport
 from pysentinel2 import grid
 from pysentinel2.index import Index
 from pysentinel2.paths import Paths
@@ -324,6 +333,7 @@ class Cube:
 
     config: Config = default_config
     sentinel2: Sentinel2 = defaultsentinel2
+    lease_s: float = 1800.0          # a day claim older than this is presumed abandoned
     paths: Paths = field(init=False)
 
     paths.default(lambda s: Paths(s.config))
@@ -332,7 +342,7 @@ class Cube:
         makedirs(s.paths.root, exist_ok=True)
 
     def _index(s) -> Index:
-        return Index(s.paths.index_db)
+        return Index(s.paths.index)
 
     # -- fill -------------------------------------------------------------
 
@@ -386,7 +396,8 @@ class Cube:
                 return 0
 
             _configure_rio()
-            zarr.open_group(s.paths.store, mode='a', use_consolidated=False)
+            with Claim(s.paths.root, ('meta', 'cube')):
+                zarr.open_group(s.paths.store, mode='a', use_consolidated=False)
             fmask_band = s.sentinel2.cloud_mask_band
             all_bands = list(s.sentinel2.bands)
             refl_bands = [b for b in all_bands if b != fmask_band]
@@ -413,30 +424,35 @@ class Cube:
                         {d: day_items[d] for d in batch}, all_bands, win, threads)
                     for day in batch:
                         data = data_by_day.get(day)
-                        day_group = _day_group(s.paths.store, day)
-                        if data is None:
-                            # A searched day whose items yielded no pixels:
-                            # store the empty fmask so reads see nodata, mark.
-                            s._write_band(day_group, fmask_band, None, win,
-                                          np.dtype('uint8'), 0)
-                            ix.mark_rect(day, win)
-                            downloaded += win_area
-                            continue
                         # Integrity gate: fail_on_error=False turns failed
                         # HTTP reads into silent nodata. A band mostly nodata
                         # where the day's own fmask has valid ground is a
                         # failed download, not a data gap — writing and
                         # marking it would poison the store permanently.
                         # Leave it unmarked (and unwritten) for retry.
-                        if _reflectance_looks_failed(data, refl_bands, s.sentinel2):
+                        if data is not None and _reflectance_looks_failed(data, refl_bands, s.sentinel2):
                             failed.append((day, win))
                             continue
-                        s._write_band(day_group, fmask_band, data[fmask_band],
-                                      win, np.dtype('uint8'), 0)
-                        for band in refl_bands:
-                            s._write_band(day_group, band, data[band], win,
-                                          np.dtype('int16'), -999)
-                        ix.mark_rect(day, win)
+                        # One writer per day across nodes: rect writes are
+                        # partial chunks (read-modify-write). Re-diff under
+                        # the claim in case another job wrote this window
+                        # while we were downloading.
+                        with Claim(s.paths.root, ('s2', day), lease_s=s.lease_s):
+                            if not grid.rect_subtract(win, ix.covered_rects(day)):
+                                continue
+                            day_group = _day_group(s.paths.store, day)
+                            if data is None:
+                                # A searched day whose items yielded no pixels:
+                                # store the empty fmask so reads see nodata, mark.
+                                s._write_band(day_group, fmask_band, None, win,
+                                              np.dtype('uint8'), 0)
+                            else:
+                                s._write_band(day_group, fmask_band, data[fmask_band],
+                                              win, np.dtype('uint8'), 0)
+                                for band in refl_bands:
+                                    s._write_band(day_group, band, data[band], win,
+                                                  np.dtype('int16'), -999)
+                            ix.mark_rect(day, win)
                         downloaded += win_area
             if failed:
                 print(f'pysentinel2: {len(failed)} (day, window) load(s) failed '
@@ -510,6 +526,43 @@ class Cube:
         finally:
             ix.close()
 
+    def gaps(s, bbox: list[float], start: date, end: date) -> GapReport:
+        """Which (solar day, tight window) units of the request are not on
+        disk, and why. Touches no network.
+
+        A unit is one scene day of the index; it is present when the
+        day's coverage rects cover the whole tight window. ``never_fetched``
+        otherwise (``claimed_in_progress`` if another process holds the
+        day). If this region and range were never STAC-searched, one extra
+        unit ``('search', start, end)`` is ``never_fetched``: the scene
+        list itself is unknown, so the count of days is a lower bound.
+        """
+        window = grid.tight_window_for_bbox(bbox)
+        bbox6933 = (grid.X0 + window[2] * grid.RES, grid.Y_TOP - window[1] * grid.RES,
+                    grid.X0 + window[3] * grid.RES, grid.Y_TOP - window[0] * grid.RES)
+        ix = s._index()
+        gaps, expected = [], 0
+        try:
+            if not ix.search_covered(bbox6933, start, end):
+                expected += 1
+                gaps.append(Gap(('search', str(start), str(end)), 'never_fetched',
+                                detail='region never searched'))
+            for day in sorted(ix.scenes_for_range(start, end, s.sentinel2.max_cloud_cover)):
+                expected += 1
+                if not grid.rect_subtract(window, ix.covered_rects(day)):
+                    continue
+                if os.path.isdir(Claim(s.paths.root, ('s2', day)).dir):
+                    gaps.append(Gap((day, window), 'claimed_in_progress'))
+                else:
+                    gaps.append(Gap((day, window), 'never_fetched'))
+        finally:
+            ix.close()
+        return GapReport(expected=expected, gaps=tuple(gaps))
+
+    def gaps_troi(s, troi) -> GapReport:
+        """:meth:`gaps` for a :class:`troi.Troi`."""
+        return s.gaps(troi.bbox, troi.start, troi.end)
+
     def _search_stac(s, ix: Index, window, bbox6933, start: date, end: date) -> None:
         """STAC-search the window (no cloud filter — that's applied at read
         from the index, so a laxer threshold later needs no re-search)."""
@@ -580,22 +633,19 @@ class Cube:
                 out[day] = slice_
         return out
 
-    @staticmethod
-    def _write_band(day_group, band, da, window, default_dtype, default_nodata):
+    def _write_band(s, day_group, band, da, window, default_dtype, default_nodata):
         dtype = da.dtype if da is not None else default_dtype
         nodata = da.attrs.get('nodata') if da is not None else None
         if nodata is None:
             nodata = 0 if dtype.kind == 'u' else default_nodata
-        try:
-            arr = day_group[band]
-        except KeyError:
-            arr = day_group.create_array(
-                band,
-                shape=(grid.HEIGHT_PX, grid.WIDTH_PX),
-                chunks=(grid.CHUNK, grid.CHUNK),
-                dtype=dtype,
-                fill_value=nodata,
-            )
+        arr = ensure_array(
+            s.paths.root, day_group, band,
+            shape=(grid.HEIGHT_PX, grid.WIDTH_PX),
+            chunks=(grid.CHUNK, grid.CHUNK),
+            dtype=dtype,
+            fill_value=nodata,
+        )
+        if 'nodata' not in arr.attrs:
             arr.attrs['nodata'] = int(nodata)
         if da is not None:
             row0, row1, col0, col1 = window
@@ -747,8 +797,13 @@ class Cube:
         }
         ds = Dataset(data_vars, coords={'time': time, 'y': y, 'x': x})
         import rioxarray  # noqa: F401 — registers the .rio accessor
+        transform = (grid.RES, 0.0, grid.X0 + col0 * grid.RES, 0.0, -grid.RES, grid.Y_TOP - row0 * grid.RES)
         return ds.rio.write_crs(grid.CRS, inplace=False).assign_attrs(
-            read_at=datetime.now(timezone.utc).isoformat()
+            read_at=datetime.now(timezone.utc).isoformat(),
+            # Native georeferencing contract shared by every lab store:
+            # nothing here is resampled beyond odc's one-time load onto
+            # this grid; per-band nodata sits on each variable.
+            crs=grid.CRS, transform=list(transform), nodata=None, native_res_m=grid.RES,
         )
 
 
@@ -964,6 +1019,92 @@ def test_troi_adapters_match_agnostic_calls():
     )
 
 
+def _fake_search(day: str, item_id: str):
+    """Stand-in for ``Cube._search_stac``: one synthetic scene, search recorded."""
+    def fake(self, ix, window, bbox6933, start, end):
+        ix.upsert_scenes([(item_id, day, 1.0, {'id': item_id})])
+        ix.record_search((-1e9, -1e9, 1e9, 1e9), start, end)   # "searched everywhere"
+    return fake
+
+
+def _fake_load(value: int):
+    """Stand-in for ``Cube._load_days``: a clear, constant frame per day."""
+    def fake(self, items_by_day, bands, window, threads):
+        row0, row1, col0, col1 = window
+        out = {}
+        for day in items_by_day:
+            data = {}
+            for band in bands:
+                is_mask = band == self.sentinel2.cloud_mask_band
+                arr = np.full((row1 - row0, col1 - col0), 1 if is_mask else value,
+                              dtype='uint8' if is_mask else 'int16')
+                data[band] = xr.DataArray(arr, dims=('y', 'x'), attrs={'nodata': 0 if is_mask else -999})
+            out[day] = Dataset(data)
+        return out
+    return fake
+
+
+class _patched:
+    def __init__(self, cls, name, value):
+        self.cls, self.name, self.value = cls, name, value
+
+    def __enter__(self):
+        self.real = getattr(self.cls, self.name)
+        setattr(self.cls, self.name, self.value)
+
+    def __exit__(self, *exc):
+        setattr(self.cls, self.name, self.real)
+
+
+def test_gaps_and_fill_with_fake_source():
+    """An unsearched region is one gap; after a (fake) fill the scene day is
+    covered, gaps() is complete, and a second fill touches nothing."""
+    cube = _tmp_cube()
+    before = cube.gaps(_TEST_BBOX, _TEST_START, _TEST_END)
+    with _patched(Cube, '_search_stac', _fake_search('2024-01-03', 'synth_e')), \
+            _patched(Cube, '_load_days', _fake_load(500)):
+        n1 = cube.fill(_TEST_BBOX, _TEST_START, _TEST_END)
+        n2 = cube.fill(_TEST_BBOX, _TEST_START, _TEST_END)
+    after = cube.gaps(_TEST_BBOX, _TEST_START, _TEST_END)
+    ds = cube.get_ds(_TEST_BBOX, _TEST_START, _TEST_END)
+    claims = os.listdir(os.path.join(cube.paths.root, 'claims'))
+    return (before.counts['never_fetched'] == 1 and before.gaps[0].detail == 'region never searched'
+            and n1 > 0 and n2 == 0 and after.complete and after.expected == 1
+            and int(ds['nbart_red'].isel(time=0)[0, 0]) == 500
+            and ds.attrs['crs'] == grid.CRS and ds.attrs['native_res_m'] == grid.RES
+            and claims == [])
+
+
+def _worker_fill(tmp_dir, bbox, value):
+    cube = Cube(config=Config(out_dir=tmp_dir, tmp_dir=tmp_dir))
+    with _patched(Cube, '_search_stac', _fake_search('2024-01-03', 'synth_f')), \
+            _patched(Cube, '_load_days', _fake_load(value)):
+        cube.fill(bbox, _TEST_START, _TEST_END)
+
+
+def test_two_processes_fill_overlapping_bboxes():
+    """Two processes fill overlapping windows of the same day at once;
+    the day's rects cover the union, pixels are intact, no claims left."""
+    import multiprocessing as mp
+    cube = _tmp_cube()
+    tmp = cube.config.tmp_dir
+    west = [148.36265, -33.52606, 148.37765, -33.50606]
+    east = [148.36765, -33.52606, 148.38265, -33.50606]
+    ctx = mp.get_context('fork')
+    ps = [ctx.Process(target=_worker_fill, args=(tmp, west, 100)),
+          ctx.Process(target=_worker_fill, args=(tmp, east, 200))]
+    for p in ps:
+        p.start()
+    for p in ps:
+        p.join(timeout=300)
+    report = cube.gaps(_TEST_BBOX, _TEST_START, _TEST_END)
+    ds = cube.get_ds(_TEST_BBOX, _TEST_START, _TEST_END)
+    vals = np.unique(ds['nbart_red'].values)
+    return (all(p.exitcode == 0 for p in ps) and report.complete
+            and set(vals.tolist()) <= {100, 200}
+            and os.listdir(os.path.join(cube.paths.root, 'claims')) == [])
+
+
 def test():
     return all([
         test_synthetic_write_read_roundtrip(),
@@ -978,6 +1119,8 @@ def test():
         test_screen_legacy_recognition(),
         test_plan_day_windows(),
         test_troi_adapters_match_agnostic_calls(),
+        test_gaps_and_fill_with_fake_source(),
+        test_two_processes_fill_overlapping_bboxes(),
     ])
 
 

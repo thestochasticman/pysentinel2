@@ -1,12 +1,12 @@
 # Storage & index
 
 The store has two components under one directory: a sparse Zarr store
-holding pixel data, and a SQLite database recording what that data is
+holding pixel data, and a tree of JSON markers recording what that data is
 and how it was obtained.
 
 ```
 {config.tmp_dir}/sentinel2_cube/
-├── index.db          # the ledger (SQLite, WAL mode)
+├── index/            # the ledger: coverage rects, scenes, searches (JSON markers)
 └── cube.zarr/
     ├── 2023-12-18/   # one group per solar day
     │   ├── nbart_red         # one array per band on the full global grid
@@ -43,56 +43,32 @@ the grid's unit of deduplication.
   the global grid: the example window (4 chunks × 12 days × 11 bands)
   occupies ≈ 14 MB.
 
-## The SQLite ledger
+## The marker index
 
-Three tables, none holding pixel data (`pysentinel2/index.py`):
+Three marker trees under `index/`, none holding pixel data
+(`pysentinel2/index.py`), each file committed by write-to-temp + atomic
+rename (`troi.ledger.Markers`):
 
-```mermaid
-erDiagram
-    scenes {
-        TEXT item_id PK "STAC item id"
-        TEXT solar_day "YYYY-MM-DD"
-        REAL cloud_cover "eo:cloud_cover, nullable"
-        TEXT item_json "full STAC item"
-    }
-    chunks {
-        TEXT solar_day PK
-        INTEGER cy PK "chunk row"
-        INTEGER cx PK "chunk column"
-        TEXT written_at
-    }
-    searches {
-        REAL x0 "searched extent, EPSG:6933"
-        REAL y0 "searched extent"
-        REAL x1 "searched extent"
-        REAL y1 "searched extent"
-        TEXT start "date range searched"
-        TEXT end "date range searched"
-        TEXT searched_at
-    }
-```
+| tree | one file per | holds |
+|---|---|---|
+| `scenes/<YYYY>/<YYYY-MM-DD>/<item_id>.json` | STAC item ever seen | solar day, `eo:cloud_cover`, the full item JSON |
+| `coverage/<YYYY-MM-DD>/<uuid>.json` | written pixel rect | `row0, row1, col0, col1` on the global grid |
+| `searches/<uuid>.json` | STAC search ever run | EPSG:6933 bbox and date range |
 
-**`scenes`** caches every STAC item ever returned, including its full
-JSON. Day selection, cloud filtering and re-fills therefore work
-offline; the STAC API is only contacted for regions/ranges never seen
-before. Because *all* scenes are recorded regardless of cloud cover,
-changing `max_cloud_cover` later is a pure read-side change.
+- **scenes** lets day selection and re-fills work offline; cloud
+  filtering is applied at read time, so a laxer threshold later needs
+  no re-search.
+- **coverage** is the dedup ledger at pixel exactness: a day's missing
+  work is `grid.rect_subtract(tight_window, covered_rects(day))`.
+- **searches** distinguishes *"searched, no scenes exist"* (a valid,
+  cacheable answer) from *"never asked"*.
 
-**`coverage`** is the deduplication ledger, at pixel exactness: a row
-`(solar_day, row0, row1, col0, col1)` records one written window. A day's
-missing work is its requested window minus the union of its rects
-(`grid.rect_subtract`); fills append one rect per day they complete.
-Legacy stores that used the fixed-chunk `chunks` table migrate
-automatically on first open (each chunk becomes a rect; x-adjacent runs
-coalesce). The old semantics for reference: a row `(solar_day, cy, cx)`
-asserts that this cell of the global grid is completely written for
-that day. `fill()` computes `wanted − done` per day and downloads only
-the difference.
-
-**`searches`** records the spatial extent and date range of every STAC
-search. `search_covered()` answers "is this request contained in some
-past search?" — which is what distinguishes *"searched, no scenes
-exist"* (a valid, cacheable answer) from *"never asked"*.
+Why files and not SQLite: the cube is filled by many PBS jobs on many
+Gadi nodes against one store on Lustre, which is mounted `localflock`,
+so file locks are node-local and SQLite is unsafe in any journal mode.
+What Lustre does serialise across nodes is `mkdir` and `rename`; the
+index and the claims are built from those alone
+(`troi/docs/ledger.md`).
 
 ## Crash-safety semantics
 
@@ -104,24 +80,28 @@ sequenceDiagram
     participant F as fill()
     participant S3 as DEA S3
     participant Z as cube.zarr
-    participant DB as index.db (WAL)
+    participant C as claims/s2-<day>
+    participant IX as index/coverage
 
-    F->>S3: fetch missing cells (odc.stac.load)
+    F->>S3: fetch missing rects (odc.stac.load)
     S3-->>F: pixel window
-    F->>Z: write whole chunks
-    Note over Z: a crash here leaves chunks written<br/>but unrecorded; they are re-fetched later
-    F->>DB: mark_chunks(day, cells) — one transaction
-    Note over DB: only now is the cell "done"
+    F->>C: mkdir (one writer per day, across nodes)
+    F->>Z: write the rect (zarr commits each chunk by rename)
+    Note over Z: a crash here leaves pixels written<br/>but unrecorded; they are re-fetched later
+    F->>IX: mark_rect(day, rect) — one file, atomic rename
+    Note over IX: only now is the rect "done"
+    F->>C: rmdir
 ```
 
-- Pixels are written before the ledger row, and the ledger commit is a
-  single WAL transaction. A crash at any point leaves cells unmarked,
-  and the next run re-downloads and overwrites them; because writes are
-  whole chunks at fixed grid positions, re-writing a cell reproduces
-  the same bytes rather than accumulating inconsistency.
-- The inverse failure — a ledger row without its pixels — cannot occur,
-  because `mark_chunks` runs only after the Zarr writes return.
-- WAL mode allows concurrent readers while a fill is in progress.
+- Pixels are written before the marker, and the marker is one atomic
+  rename. A crash at any point leaves rects unmarked, and the next run
+  re-downloads and overwrites them; re-writing a rect reproduces the
+  same bytes rather than accumulating inconsistency.
+- The inverse failure — a marker without its pixels — cannot occur,
+  because `mark_rect` runs only after the Zarr writes return.
+- Rect writes are partial chunks (read-modify-write), so a day is
+  written under a claim directory; a claim abandoned by a dead job
+  expires after its lease and is taken over. Readers never block.
 
 ## Where the store lives
 
@@ -133,7 +113,7 @@ troi: every troi on the machine reads and fills the same cube.
 from pysentinel2.paths import Paths
 paths = Paths()          # from the default Config
 paths.store              # .../sentinel2_cube/cube.zarr
-paths.index_db           # .../sentinel2_cube/index.db
+paths.index              # .../sentinel2_cube/index
 ```
 
 The directory is a cache: deleting it loses no state that cannot be

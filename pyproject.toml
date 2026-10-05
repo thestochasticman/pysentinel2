@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pysentinel2"
-version = "0.1.0"
+version = "0.2.0+gadi"
 description = "Cached Sentinel-2 ARD cube downloads (STAC to Zarr) with cloud masking"
 readme = "README.md"
 authors = [
@@ -35,7 +35,7 @@ classifiers = [
 # provided by conda via environment.yml; only the lab core is declared
 # here so `pip install -e .` is fast and doesn't re-resolve it.
 dependencies = [
-  "troi-core @ git+https://github.com/thestochasticman/troi.git",
+  "troi-core @ git+https://github.com/thestochasticman/troi.git@gadi",
   "attrs",
   "typing_extensions",
   "numpy",

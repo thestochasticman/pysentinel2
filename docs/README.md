@@ -8,7 +8,7 @@ cover how and why it works.
 |---|---|
 | [Architecture](architecture.md) | Package composition, the `fill`/`get_ds` data flow, design principles |
 | [The grid](grid.md) | The fixed EPSG:6933 grid, chunk geometry, and why it makes deduplication deterministic |
-| [Storage & index](storage.md) | Zarr store layout, the SQLite schema, crash-safety semantics |
+| [Storage & index](storage.md) | Zarr store layout, the marker index, crash-safety semantics |
 | [Cleaning & masking](cleaning.md) | The fmask-based on-read cleaning pipeline: classification, dilation, frame gating |
 | [Spectral indices](indices.md) | On-read index derivation: NDVI, NIRv, NDTI, CAI, CFI — formulas and provenance |
 | [Robustness](robustness.md) | Hardening against DEA STAC/S3 failure modes (see also [`diagnostics.md`](../diagnostics.md)) |
@@ -57,9 +57,11 @@ flowchart LR
 4. **Composition rather than inheritance.** `Cube` is assembled from
    independent, individually testable parts (`grid`, `Index`, `Paths`,
    `Sentinel2`), a convention shared across the Borevitz Lab packages.
-5. **Crash tolerance by construction.** Writes are whole-chunk and the
-   ledger is transactional (SQLite/WAL); an interrupted fill leaves
-   cells unmarked, and the next run resumes from that point.
+5. **Crash tolerance by construction.** Pixels are written before their
+   marker, and every marker is committed by atomic rename; an
+   interrupted fill leaves cells unmarked, and the next run resumes
+   from that point. No database: the index is safe for many jobs on
+   many nodes sharing one store on Lustre.
 
 ## Reproducing the figures
 

@@ -19,13 +19,17 @@ off-swath days are all stored raw and classified at read time.*
 ## How it works
 
 ```
-{data_root}/sentinel2_cube/
-├── index.db      # SQLite: coverage rects · seen scenes · past searches
-└── cube.zarr/
-    ├── 2024-01-03/   # one group per solar day
-    │   ├── nbart_red # arrays on a fixed EPSG:6933 10 m global grid
-    │   └── ...       # sparse: only written 256×256-px chunks exist on disk
-    └── 2024-01-08/ ...
+{tmp_dir}/sentinel2_cube/
+├── cube.zarr/
+│   ├── 2024-01-03/   # one group per solar day
+│   │   ├── nbart_red # arrays on a fixed EPSG:6933 10 m global grid
+│   │   └── ...       # sparse: only written 256×256-px chunks exist on disk
+│   └── 2024-01-08/ ...
+├── index/
+│   ├── coverage/2024-01-03/<uuid>.json   # one populated pixel rect per file
+│   ├── scenes/2024/2024-01-03/<item>.json # every STAC item ever seen
+│   └── searches/<uuid>.json              # every (bbox, range) ever searched
+└── claims/       # cross-node mutex dirs, present only while a day is written
 ```
 
 - Any bbox maps deterministically to a pixel window on the fixed grid.
@@ -44,8 +48,18 @@ off-swath days are all stored raw and classified at read time.*
 - Spectral indices — NDVI, CFI, NIRv, NDTI, CAI — are on-read
   derivatives too: `get_ds(..., indices=('NDVI', 'NIRv'))` computes them
   from cloud-masked reflectance and stores nothing.
-- Writes are whole-chunk and the index is transactional (SQLite/WAL): a
-  crash mid-fill just leaves cells unmarked, and the next run resumes.
+- The index is files, not a database. This branch (`gadi`) fills the
+  cube from many PBS jobs on many Gadi nodes against one store on Lustre,
+  where file locks are node-local and SQLite is unsafe; see
+  [troi/docs/ledger.md](https://github.com/thestochasticman/troi/blob/gadi/docs/ledger.md).
+  Every marker is committed by atomic rename after its pixels, so a
+  crash mid-fill just leaves cells unmarked and the next run resumes.
+  Rect writes are partial chunks, so each day is written under a claim
+  directory; different days never contend.
+- `cube.gaps(bbox, start, end)` lists each scene day whose tight window is
+  not fully covered (`never_fetched` or `claimed_in_progress`), plus one
+  unit if the region was never searched. No network. `get_ds` carries the
+  lab's georeferencing attrs `crs`, `transform`, `nodata`, `native_res_m`.
 
 ## Usage
 
@@ -85,7 +99,8 @@ composition only):
 - **`Paths`** (`pysentinel2.paths`) — derived locations of the store for
   a given `Config`.
 - **`grid`** — the fixed global grid (pure, offline-testable math).
-- **`Index`** (`pysentinel2.index`) — the SQLite ledger.
+- **`Index`** (`pysentinel2.index`) — the file ledger of coverage rects,
+  seen scenes and past searches.
 - **`Cube`** (`pysentinel2.cube`) — ties them together.
 
 ## Cleaning & masking
@@ -146,7 +161,7 @@ request round on every day.
 ### pip
 
 ```bash
-pip install git+https://github.com/thestochasticman/pysentinel2.git
+pip install git+https://github.com/thestochasticman/pysentinel2.git@gadi
 ```
 
 Dependencies (the `troi` core included, pulled from GitHub) are

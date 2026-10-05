@@ -18,7 +18,7 @@ flowchart TD
         S2["Sentinel2<br/><i>STAC URL, collections, bands,<br/>fmask codes, cloud threshold</i>"]
         P["Paths<br/><i>derived store locations</i>"]
         G["grid<br/><i>pure EPSG:6933 chunk math</i>"]
-        IX["Index<br/><i>SQLite ledger</i>"]
+        IX["Index<br/><i>file ledger</i>"]
         CB["Cube<br/><i>fill · read · clean · derive</i>"]
         DRV["derive<br/><i>spectral indices</i>"]
         DL["download_sentinel2 / clean_sentinel2<br/><i>thin Troi-compatible wrappers</i>"]
@@ -37,9 +37,9 @@ flowchart TD
 | Component | Module | Responsibility |
 |---|---|---|
 | `Sentinel2` | `pysentinel2/sentinel2.py` | Immutable configuration: STAC endpoint, the two DEA ARD collections, the 11 stored bands, fmask class codes, per-scene cloud-cover threshold. |
-| `Paths` | `pysentinel2/paths.py` | Derives the store locations (`{tmp_dir}/sentinel2_cube/{cube.zarr, index.db}`) from a `Config`. Inputs go in `Config`; derived locations in `Paths`. |
+| `Paths` | `pysentinel2/paths.py` | Derives the store locations (`{tmp_dir}/sentinel2_cube/{cube.zarr, index/}`) from a `Config`. Inputs go in `Config`; derived locations in `Paths`. |
 | `grid` | `pysentinel2/grid.py` | The fixed global grid. Pure functions, no I/O — see [The grid](grid.md). |
-| `Index` | `pysentinel2/index.py` | The SQLite ledger of populated cells, seen scenes, and past searches — see [Storage & index](storage.md). |
+| `Index` | `pysentinel2/index.py` | The file ledger of populated rects, seen scenes, and past searches — see [Storage & index](storage.md). |
 | `Cube` | `pysentinel2/cube.py` | Orchestration: diff → fill → read → (optionally) clean → (optionally) derive. |
 | `derive` | `pysentinel2/derive.py` | On-read spectral indices — see [Spectral indices](indices.md). |
 | wrappers | `download_sentinel2.py`, `clean_sentinel2.py` | Compatibility entry points for pipelines that speak `troi.troi.Troi`. |
