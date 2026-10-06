@@ -61,6 +61,81 @@ off-swath days are all stored raw and classified at read time.*
   unit if the region was never searched. No network. `get_ds` carries the
   lab's georeferencing attrs `crs`, `transform`, `nodata`, `native_res_m`.
 
+### The pieces
+
+```mermaid
+flowchart LR
+    subgraph root ["sentinel2_cube/"]
+        direction TB
+        Z[("cube.zarr/&lt;day&gt;/&lt;band&gt;<br/>fixed EPSG:6933 10 m grid<br/>chunks 256 × 256 px, sparse")]
+        SC["index/scenes/&lt;yyyy&gt;/&lt;day&gt;/&lt;item&gt;.json<br/>every STAC item ever seen"]
+        CV["index/coverage/&lt;day&gt;/&lt;uuid&gt;.json<br/>one populated pixel rect per file"]
+        SR["index/searches/&lt;uuid&gt;.json<br/>every (bbox, range) ever searched"]
+        C["claims/s2-&lt;day&gt;/ and claims/meta-cube/"]
+    end
+    FILL(["fill"]) -->|"① search once per region · record"| SR
+    FILL --> SC
+    FILL -->|"② claim the day, around the writes only"| C
+    FILL -->|"③ write the rect's bands"| Z
+    FILL -->|"④ mark the rect"| CV
+    FILL -->|"⑤ release"| C
+    GET(["get_ds"]) --> FILL
+    GET -->|"cloud filter · clean · indices, on read"| Z
+    GET --> SC
+    GAPS(["gaps"]) --> SR
+    GAPS --> SC
+    GAPS --> CV
+    GAPS --> C
+```
+
+The unit of the ledger is a **pixel rectangle of one solar day**: fills
+only ever write axis-aligned windows, so a day's coverage is a short
+list of rects and the missing work is the request window minus them,
+pixel-exact. Rects are smaller than the 256 px chunks, so the chunks
+touched by a day are read, updated and written back under that day's
+claim. Download happens before the claim is taken, so the claim is held
+for the writes only. Shared primitives and the general protocol are in
+[troi/docs/ledger.md](https://github.com/thestochasticman/troi/blob/gadi/docs/ledger.md).
+
+### A fill, step by step
+
+```mermaid
+flowchart TD
+    R(["fill(bbox, start, end)"]) --> W["tight pixel window of the bbox on the 10 m grid"]
+    W --> SR{"a recorded search<br/>contains this window and range?"}
+    SR -- no --> ST["STAC search, no cloud filter ·<br/>upsert scenes · record the search"]
+    SR -- yes --> DAYS
+    ST --> DAYS["scene days in range under the cloud threshold,<br/>from the index"]
+    DAYS --> MISS["per day: missing rects =<br/>window minus covered rects"]
+    MISS --> D1{"anything missing?"}
+    D1 -- no --> DONE(["0 · no network"])
+    D1 -- yes --> GRP["group days by load window ·<br/>batches sized to ~256 MB in flight"]
+    GRP --> LD["one bulk odc.stac.load per batch,<br/>every band, 16 threads"]
+    LD --> GATE{"reflectance mostly nodata<br/>where fmask has ground?"}
+    GATE -- yes --> FAIL["leave unwritten and unmarked<br/>for retry"]
+    GATE -- no --> C["Claim ('s2', day) · lease 1800 s"]
+    C --> D2{"re-diff the rect<br/>against covered rects"}
+    D2 -- covered --> REL
+    D2 -- missing --> WR["write fmask then each band<br/>into the day's arrays · mark the rect"]
+    WR --> REL["release"] --> NXT["next day / batch"]
+    FAIL --> NXT
+```
+
+### What `gaps()` can say
+
+`gaps(bbox, start, end)` enumerates the scene days of the index for the
+window and classifies every one whose coverage rects do not cover it.
+It touches no network.
+
+| status | for a unit |
+|---|---|
+| `never_fetched` with detail `region never searched` | the (window, range) has no recorded search, so the scene list is unknown; one extra unit, and the day count is a lower bound |
+| `claimed_in_progress` | another job holds that day's claim right now |
+| `never_fetched` | part of the window has no coverage rect for that day; this should be 0 after a fill |
+
+A searched day with no scene is not a gap: the index knows there was
+nothing to fetch.
+
 ## Usage
 
 The core API is **troi-agnostic** — just a bbox and dates, no setup:
